@@ -22,10 +22,18 @@ let awake = false; // hands-free conversation mode on/off
 let turnId = 0;
 let abortCtl = null;
 let errorTimer = null;
+let statusDetail = ""; // e.g. "searching: gold rate today" while thinking
+
+// On phones the always-on wake word is off: Android beeps every time the
+// recognizer restarts, and it drains the battery. Tap the orb instead.
+const IS_TOUCH = matchMedia("(pointer: coarse)").matches;
+const SpeechRec = IS_TOUCH ? null : window.SpeechRecognition || window.webkitSpeechRecognition;
 
 const STATUS = {
-  sleep: ["tap to wake", "click the orb or press space"],
-  listening: ["listening...", "speak naturally · space to pause"],
+  sleep: IS_TOUCH
+    ? ["tap to talk", "tap the orb"]
+    : SpeechRec ? ["say “ANVI” to wake", "or click the orb · space"] : ["tap to wake", "click the orb or press space"],
+  listening: ["listening...", IS_TOUCH ? "speak naturally · tap to stop" : "speak naturally · say “ANVI” to sleep"],
   thinking: ["thinking...", "one moment"],
   speaking: ["speaking...", "tap to interrupt"],
 };
@@ -38,7 +46,7 @@ function setState(next) {
 
 function renderStatus() {
   const [s, h] = STATUS[state];
-  statusEl.textContent = s;
+  statusEl.textContent = state === "thinking" && statusDetail ? statusDetail.replace(/\.+$/, "") + "..." : s;
   statusEl.className = "status" + (state === "sleep" ? " muted" : "");
   hintEl.textContent = h;
 }
@@ -71,7 +79,6 @@ let audioCtx = null;
 let micStream = null;
 let micAnalyser = null;
 let outAnalyser = null;
-let currentSource = null;
 const levelBuf = new Float32Array(1024);
 
 function ensureAudioCtx() {
@@ -125,7 +132,7 @@ const MIME = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "
 ) || "";
 
 let recorder = null;
-const vad = { floor: 0.004, voicedMs: 0, silenceMs: 0, speaking: false, startedAt: 0, recStart: 0 };
+const vad = { floor: 0.004, voicedMs: 0, silenceMs: 0, totalVoicedMs: 0, speaking: false, startedAt: 0, recStart: 0 };
 
 function startRecorder() {
   if (!micStream) return;
@@ -143,7 +150,7 @@ function startRecorder() {
   };
   rec.start(200);
   recorder = rec;
-  Object.assign(vad, { voicedMs: 0, silenceMs: 0, speaking: false, recStart: performance.now() });
+  Object.assign(vad, { voicedMs: 0, silenceMs: 0, totalVoicedMs: 0, speaking: false, recStart: performance.now() });
 }
 
 function stopRecorder(discard) {
@@ -173,6 +180,7 @@ setInterval(() => {
   if (level > threshold) {
     vad.voicedMs += dt;
     vad.silenceMs = 0;
+    if (vad.speaking) vad.totalVoicedMs += dt;
     if (!vad.speaking && vad.voicedMs >= 160) {
       vad.speaking = true;
       vad.startedAt = now;
@@ -183,8 +191,12 @@ setInterval(() => {
   }
 
   if (vad.speaking && (vad.silenceMs >= 900 || now - vad.startedAt > 25000)) {
-    setState("thinking");
-    stopRecorder(false);
+    if (vad.totalVoicedMs < 400) {
+      stopRecorder(true); // a cough, click or bump: too short to be speech, keep listening
+    } else {
+      setState("thinking");
+      stopRecorder(false);
+    }
   } else if (!vad.speaking && now - vad.recStart > 12000) {
     stopRecorder(true); // nothing said for a while; restart to keep takes small
   }
@@ -205,9 +217,14 @@ async function handleUtterance(blob) {
     const res = await fetch("/api/transcribe", { method: "POST", body: form, signal: abortCtl.signal });
     const data = await res.json();
     if (id !== turnId) return;
-    if (!res.ok) throw new Error(data.error || "transcription failed");
+    if (!res.ok) throw new Error(res.status === 401 ? "this phone isn't paired — scan the QR code on your PC" : data.error || "transcription failed");
 
     if (!data.transcript) return beginListening(); // noise, not speech
+    if (isSleepCommand(data.transcript)) {
+      showYou(data.transcript);
+      showReply("");
+      return goToSleep();
+    }
     await converse(data.transcript, id);
   } catch (err) {
     if (err.name === "AbortError" || id !== turnId) return;
@@ -236,6 +253,7 @@ async function sendText(text) {
 async function converse(text, id) {
   showYou(text);
   showReply("");
+  statusDetail = "";
   setState("thinking");
   abortCtl = abortCtl && !abortCtl.signal.aborted ? abortCtl : new AbortController();
 
@@ -245,44 +263,391 @@ async function converse(text, id) {
     body: JSON.stringify({ text }),
     signal: abortCtl.signal,
   });
-  const data = await res.json();
-  if (id !== turnId) return;
-  if (!res.ok) throw new Error(data.error || "ANVI could not answer");
+  if (!res.ok) {
+    let msg = "ANVI could not answer";
+    try { msg = (await res.json()).error || msg; } catch (_) {}
+    throw new Error(msg);
+  }
 
-  showReply(data.reply);
-  if (data.audio) await speak(data.audio, id);
+  // the reply streams in as one JSON event per line
+  const queue = (currentQueue = new SpeechQueue(id));
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = "";
+  let failure = null;
+
+  const handle = (ev) => {
+    if (ev.t === "caption") showReply(ev.text);
+    else if (ev.t === "audio") queue.add(ev.data);
+    else if (ev.t === "code") showCode(ev.blocks);
+    else if (ev.t === "error") failure = ev.error;
+    else if (ev.t === "status") {
+      statusDetail = ev.text;
+      if (state === "thinking") renderStatus();
+    }
+  };
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (id !== turnId) {
+      reader.cancel().catch(() => {});
+      return;
+    }
+    if (done) break;
+    buffered += decoder.decode(value, { stream: true });
+    let nl;
+    while ((nl = buffered.indexOf("\n")) >= 0) {
+      const line = buffered.slice(0, nl).trim();
+      buffered = buffered.slice(nl + 1);
+      if (line) handle(JSON.parse(line));
+    }
+  }
+
+  queue.streamDone = true;
+  if (failure) {
+    queue.stop();
+    throw new Error(failure);
+  }
+  await queue.finished();
   if (id !== turnId) return;
+  currentQueue = null;
   awake ? beginListening() : setState("sleep");
 }
 
-async function speak(b64, id) {
-  const ac = ensureAudioCtx();
-  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-  const buffer = await ac.decodeAudioData(bytes.buffer);
-  if (id !== turnId) return;
+// Plays streamed MP3 clips back to back on the AudioContext timeline, so
+// ANVI starts talking after the first sentence instead of the whole reply.
+class SpeechQueue {
+  constructor(id) {
+    this.id = id;
+    this.chain = Promise.resolve();
+    this.sources = new Set();
+    this.endAt = 0;
+    this.scheduled = 0;
+    this.blocked = false;
+    this.streamDone = false;
+  }
 
-  setState("speaking");
-  await new Promise((resolve) => {
-    const src = ac.createBufferSource();
-    src.buffer = buffer;
-    src.connect(outAnalyser);
-    src.onended = resolve;
-    currentSource = src;
-    src.start();
-  });
-  currentSource = null;
+  add(b64) {
+    this.chain = this.chain.then(async () => {
+      if (this.id !== turnId || this.blocked) return;
+      const ac = ensureAudioCtx();
+      if (ac.state !== "running") {
+        // browsers block audio until the page has been clicked once
+        await Promise.race([ac.resume(), new Promise((r) => setTimeout(r, 400))]);
+        if (ac.state !== "running") {
+          this.blocked = true;
+          return showError("click the page once to enable ANVI's voice");
+        }
+      }
+      let buffer;
+      try {
+        buffer = await ac.decodeAudioData(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)).buffer);
+      } catch (_) {
+        return;
+      }
+      if (this.id !== turnId) return;
+
+      const src = ac.createBufferSource();
+      src.buffer = buffer;
+      src.connect(outAnalyser);
+      const startAt = Math.max(ac.currentTime + 0.03, this.endAt);
+      src.start(startAt);
+      this.endAt = startAt + buffer.duration;
+      this.scheduled++;
+      this.sources.add(src);
+      src.onended = () => {
+        this.sources.delete(src);
+        // a filler ("let me check") finished but the answer is still coming
+        if (!this.sources.size && !this.streamDone && this.id === turnId) setState("thinking");
+      };
+      if (state !== "speaking") setState("speaking");
+    });
+  }
+
+  async finished() {
+    await this.chain;
+    if (!this.scheduled || !audioCtx || this.id !== turnId) return;
+    const remaining = (this.endAt - audioCtx.currentTime) * 1000;
+    if (remaining > 0) await new Promise((r) => setTimeout(r, remaining + 80));
+  }
+
+  stop() {
+    this.id = -1;
+    for (const src of this.sources) {
+      src.onended = null;
+      try { src.stop(); } catch (_) {}
+    }
+    this.sources.clear();
+  }
 }
+
+let currentQueue = null;
 
 function cancelTurn() {
   turnId++;
   if (abortCtl) abortCtl.abort();
   abortCtl = null;
-  if (currentSource) {
-    currentSource.onended = null;
-    try { currentSource.stop(); } catch (_) {}
-    currentSource = null;
+  if (currentQueue) currentQueue.stop();
+  currentQueue = null;
+}
+
+// ---------------------------------------------------------------------------
+// Code panel
+// ---------------------------------------------------------------------------
+const codePanel = $("codePanel");
+const codeTabs = $("codeTabs");
+const codeEl = $("codeEl");
+const codeMeta = $("codeMeta");
+const copyBtn = $("copyBtn");
+const codeBtn = $("codeBtn");
+let codeBlocks = [];
+let activeBlock = 0;
+
+function showCode(blocks) {
+  codeBlocks = blocks;
+  codeTabs.innerHTML = "";
+  blocks.forEach((b, i) => {
+    const tab = document.createElement("button");
+    tab.textContent = b.filename || `${b.lang || "code"} ${blocks.length > 1 ? i + 1 : ""}`.trim();
+    tab.addEventListener("click", () => selectBlock(i));
+    codeTabs.appendChild(tab);
+  });
+  selectBlock(0);
+  codeBtn.hidden = false;
+  openCode();
+}
+
+function selectBlock(i) {
+  activeBlock = i;
+  const b = codeBlocks[i];
+  [...codeTabs.children].forEach((t, j) => t.classList.toggle("active", j === i));
+
+  const lines = b.code.split("\n").length;
+  codeMeta.textContent = [b.lang, `${lines} line${lines === 1 ? "" : "s"}`, b.path && `saved → ${b.path}`]
+    .filter(Boolean)
+    .join("  ·  ");
+
+  if (window.hljs) {
+    const res = hljs.getLanguage(b.lang)
+      ? hljs.highlight(b.code, { language: b.lang, ignoreIllegals: true })
+      : hljs.highlightAuto(b.code);
+    codeEl.innerHTML = res.value;
+  } else {
+    codeEl.textContent = b.code;
+  }
+  codeEl.parentElement.scrollTop = 0;
+  copyBtn.textContent = "copy";
+}
+
+const codeIsOpen = () => document.body.classList.contains("code-open");
+const openCode = () => codeBlocks.length && document.body.classList.add("code-open");
+const closeCode = () => document.body.classList.remove("code-open");
+
+copyBtn.addEventListener("click", async () => {
+  const b = codeBlocks[activeBlock];
+  if (!b) return;
+  try {
+    await navigator.clipboard.writeText(b.code);
+    copyBtn.textContent = "copied ✓";
+  } catch {
+    copyBtn.textContent = "copy failed";
+  }
+  setTimeout(() => (copyBtn.textContent = "copy"), 1600);
+});
+
+$("closeCodeBtn").addEventListener("click", closeCode);
+codeBtn.addEventListener("click", () => (codeIsOpen() ? closeCode() : openCode()));
+
+// ---------------------------------------------------------------------------
+// Wake word: say "ANVI" to wake up, say "ANVI" again to go to sleep
+// ---------------------------------------------------------------------------
+// While asleep the browser's built-in speech recognizer listens for the name
+// (Edge/Chrome only). While awake, the Deepgram transcript is checked instead.
+const WAKE_RE = /\b(?:an+[vb](?:i|ee|y|ie|ey|e)?|en+v(?:y|i|ee|ie)|and v|an v)\b/;
+const SLEEP_WORDS = new Set(
+  "hey hi ok okay go to sleep bye goodbye good night stop thanks thank you that s all please now shut down standby pause the a".split(" ")
+);
+
+const normalize = (text) => ` ${text.toLowerCase().replace(/[^a-z\s]/g, " ").replace(/\s+/g, " ")} `;
+const hasWakeWord = (text) => WAKE_RE.test(normalize(text));
+
+// "ANVI", "bye ANVI", "ANVI go to sleep" -> true;  "ANVI what's the time" -> false
+function isSleepCommand(text) {
+  const n = normalize(text);
+  if (!WAKE_RE.test(n)) return false;
+  const rest = n.replace(new RegExp(WAKE_RE.source, "g"), " ").trim().split(" ").filter((w) => w && !SLEEP_WORDS.has(w));
+  return rest.length === 0;
+}
+
+let wakeRec = null;
+let wakeWanted = false;
+let wakeFailures = 0;
+
+function startWakeListener() {
+  if (!SpeechRec) return;
+  wakeWanted = true;
+  if (wakeRec) return;
+
+  const rec = new SpeechRec();
+  rec.lang = "en-IN";
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.maxAlternatives = 3;
+
+  rec.onresult = (e) => {
+    wakeFailures = 0;
+    if (awake || state !== "sleep") return;
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      for (const alt of e.results[i]) {
+        if (hasWakeWord(alt.transcript)) return wakeUp();
+      }
+    }
+  };
+  rec.onerror = (e) => {
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+      wakeWanted = false;
+      showError("voice wake needs microphone access");
+    } else if (e.error !== "no-speech" && e.error !== "aborted") {
+      wakeFailures++;
+    }
+  };
+  rec.onend = () => {
+    if (wakeRec === rec) wakeRec = null;
+    if (wakeWanted) setTimeout(startWakeListener, wakeFailures ? Math.min(10000, 1000 * wakeFailures) : 200);
+  };
+
+  try {
+    rec.start();
+    wakeRec = rec;
+  } catch (_) {
+    wakeRec = null;
   }
 }
+
+function stopWakeListener() {
+  wakeWanted = false;
+  if (!wakeRec) return;
+  const rec = wakeRec;
+  wakeRec = null;
+  rec.onend = null;
+  try { rec.abort(); } catch (_) {}
+}
+
+function chime(up) {
+  const ac = audioCtx;
+  if (!ac || ac.state !== "running") return;
+  const t = ac.currentTime;
+  const osc = ac.createOscillator();
+  const gain = ac.createGain();
+  osc.type = "sine";
+  osc.frequency.setValueAtTime(up ? 620 : 900, t);
+  osc.frequency.exponentialRampToValueAtTime(up ? 980 : 520, t + 0.18);
+  gain.gain.setValueAtTime(0.0001, t);
+  gain.gain.exponentialRampToValueAtTime(0.07, t + 0.03);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.28);
+  osc.connect(gain).connect(ac.destination);
+  osc.start(t);
+  osc.stop(t + 0.3);
+}
+
+let wakeLock = null;
+
+async function keepScreenOn(on) {
+  try {
+    if (on && !wakeLock && navigator.wakeLock) {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => (wakeLock = null));
+    } else if (!on && wakeLock) {
+      await wakeLock.release();
+      wakeLock = null;
+    }
+  } catch (_) {}
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && awake) keepScreenOn(true);
+});
+
+async function wakeUp() {
+  if (awake) return;
+  stopWakeListener();
+  ensureAudioCtx();
+  if (!(await openMic())) return startWakeListener();
+  awake = true;
+  keepScreenOn(true);
+  chime(true);
+  setState("listening");
+  setTimeout(() => awake && state === "listening" && !recorder && beginListening(), 300); // skip the chime
+}
+
+function goToSleep() {
+  cancelTurn();
+  awake = false;
+  keepScreenOn(false);
+  closeMic();
+  setState("sleep");
+  chime(false);
+  startWakeListener();
+}
+
+// ---------------------------------------------------------------------------
+// Phone pairing (button only shows on the PC itself)
+// ---------------------------------------------------------------------------
+const phoneBtn = $("phoneBtn");
+const phoneModal = $("phoneModal");
+const IS_PC_PAGE = ["127.0.0.1", "localhost"].includes(location.hostname);
+phoneBtn.hidden = !IS_PC_PAGE;
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const el = document.createElement("script");
+    el.src = src;
+    el.onload = resolve;
+    el.onerror = reject;
+    document.head.appendChild(el);
+  });
+}
+
+function drawQr(el, text) {
+  el.innerHTML = "";
+  if (!text) return;
+  if (window.QRCode) new QRCode(el, { text, width: 400, height: 400, correctLevel: QRCode.CorrectLevel.M });
+  else el.textContent = "QR library couldn't load (offline?) — open the address below on your phone.";
+}
+
+function showPhoneTab(mode) {
+  phoneModal.querySelectorAll(".modal-tabs button").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
+  phoneModal.querySelectorAll(".modal-body").forEach((p) => (p.hidden = p.dataset.panel !== mode));
+}
+
+async function openPhoneModal() {
+  phoneModal.hidden = false;
+  try {
+    const [info] = await Promise.all([
+      fetch("/api/phone").then((r) => r.json()),
+      window.QRCode ? null : loadScript("https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js").catch(() => null),
+    ]);
+    if (!info.enabled) {
+      $("addrLan").textContent = "Phone access is off (ANVI_PHONE=0 in .env).";
+      return;
+    }
+    drawQr($("qrLan"), info.lan.pair_url);
+    $("addrLan").textContent = info.lan.address;
+    const pub = info.public;
+    $("publicSetup").hidden = !!pub;
+    $("publicReady").hidden = !pub;
+    drawQr($("qrPublic"), pub && pub.pair_url);
+    $("addrPublic").textContent = pub ? pub.address : "";
+    showPhoneTab(pub ? "public" : "lan");
+  } catch (err) {
+    $("addrLan").textContent = "Couldn't get the phone link: " + err.message;
+  }
+}
+
+phoneBtn.addEventListener("click", openPhoneModal);
+$("phoneClose").addEventListener("click", () => (phoneModal.hidden = true));
+phoneModal.addEventListener("click", (e) => e.target === phoneModal && (phoneModal.hidden = true));
+phoneModal.querySelectorAll(".modal-tabs button").forEach((b) => b.addEventListener("click", () => showPhoneTab(b.dataset.mode)));
 
 // ---------------------------------------------------------------------------
 // Controls
@@ -298,15 +663,8 @@ async function toggle() {
     return beginListening();
   }
 
-  if (awake) {
-    awake = false;
-    closeMic();
-    return setState("sleep");
-  }
-
-  if (!(await openMic())) return;
-  awake = true;
-  beginListening();
+  if (awake) return goToSleep();
+  wakeUp();
 }
 
 canvas.addEventListener("click", () => {
@@ -336,6 +694,10 @@ composer.addEventListener("submit", (e) => {
 });
 
 window.addEventListener("keydown", (e) => {
+  if (!phoneModal.hidden) {
+    if (e.key === "Escape") phoneModal.hidden = true;
+    return;
+  }
   if (e.target === textInput) {
     if (e.key === "Escape") closeComposer();
     return;
@@ -346,13 +708,17 @@ window.addEventListener("keydown", (e) => {
   } else if (e.key === "t" || e.key === "T" || e.key === "/") {
     e.preventDefault();
     openComposer();
-  } else if (e.key === "Escape" && awake) {
-    cancelTurn();
-    awake = false;
-    closeMic();
-    setState("sleep");
+  } else if (e.key === "c" || e.key === "C") {
+    codeIsOpen() ? closeCode() : openCode();
+  } else if (e.key === "Escape") {
+    if (codeIsOpen()) closeCode();
+    else if (awake) goToSleep();
   }
 });
+
+// audio can only start after a click/keypress; unlock it on the first one
+["pointerdown", "keydown"].forEach((ev) => window.addEventListener(ev, ensureAudioCtx, { once: true }));
+startWakeListener();
 
 fetch("/api/health")
   .then((r) => r.json())
@@ -456,6 +822,8 @@ window.addEventListener("resize", resize);
 const vis = { scale: 0.9, spin: 0.06, glow: 0.35, jitter: 0.015, line: 0.45, ripple: 0 };
 let level = 0;
 let rotY = 0;
+const orbLayout = { R: 0, cx: 0, cy: 0 };
+const dock = $("dock");
 let last = performance.now();
 
 function targets(t) {
@@ -466,7 +834,7 @@ function targets(t) {
     case "thinking":
       return { scale: 0.86 + 0.035 * Math.sin(t * 5), spin: 0.85, glow: 0.72 + 0.22 * Math.sin(t * 6.5), jitter: 0.05, line: 0.78, ripple: 1 };
     case "speaking":
-      return { scale: 1.0 + L * 0.45, spin: 0.2, glow: 0.7 + L * 1.6, jitter: 0.03 + L * 0.12, line: 0.7 + L * 0.7, ripple: L };
+      return { scale: 1.0 + L * 0.3, spin: 0.2, glow: 0.7 + L * 1.6, jitter: 0.03 + L * 0.12, line: 0.7 + L * 0.7, ripple: L };
     default:
       return { scale: 0.9, spin: 0.06, glow: 0.38, jitter: 0.015, line: 0.45, ripple: 0 };
   }
@@ -491,9 +859,20 @@ function frame(now) {
   const cyA = Math.cos(rotY), syA = Math.sin(rotY);
   const cxA = Math.cos(rotX), sxA = Math.sin(rotX);
 
-  const R = Math.min(W, H) * 0.3;
-  const cx = W / 2;
-  const cy = H * 0.47;
+  // keep the orb centred in the space the code panel leaves free
+  // and vertically between the transcript (top) and the dock (bottom)
+  const panel = codePanel.getBoundingClientRect();
+  const freeW = W > 800 ? Math.min(W, panel.left) : W;
+  const freeH = W > 800 ? H : Math.min(H, panel.top);
+  const dockRect = dock.getBoundingClientRect();
+  const areaTop = transcriptEl.getBoundingClientRect().bottom + 16;
+  const areaBottom = Math.min(freeH, dockRect.height ? dockRect.top : freeH) - 16;
+  const targetR = Math.max(60, Math.min(freeW * (W < 600 ? 0.4 : 0.3), (areaBottom - areaTop) * 0.4));
+  const ease = orbLayout.R ? Math.min(1, dt * 4) : 1;
+  orbLayout.R += (targetR - orbLayout.R) * ease;
+  orbLayout.cx += (freeW / 2 - orbLayout.cx) * ease;
+  orbLayout.cy += ((areaTop + areaBottom) / 2 - orbLayout.cy) * ease;
+  const { R, cx, cy } = orbLayout;
   const cam = 3.4;
 
   for (let i = 0; i < N; i++) {

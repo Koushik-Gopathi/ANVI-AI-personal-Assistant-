@@ -1,5 +1,6 @@
-﻿fastapi
+fastapi
 uvicorn
 requests
 python-dotenv
 python-multipart
+pillow

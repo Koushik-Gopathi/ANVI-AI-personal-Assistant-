@@ -14,3 +14,9 @@ static/
 # editor / os
 .vscode/
 Thumbs.db
+
+# code ANVI writes for you
+generated/
+
+# phone pairing secret and HTTPS certificate
+.anvi/

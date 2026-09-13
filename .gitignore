@@ -1,0 +1,16 @@
+# secrets
+.env
+
+# python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# old generated TTS audio
+static/
+*.mp3
+
+# editor / os
+.vscode/
+Thumbs.db

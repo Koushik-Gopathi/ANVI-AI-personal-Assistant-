@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ANVI</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <canvas id="orb"></canvas>
+
+  <header class="transcript" id="transcript">
+    <div class="label">you</div>
+    <div class="text" id="youText"></div>
+  </header>
+
+  <div class="reply" id="replyText"></div>
+
+  <footer class="status-wrap">
+    <div class="status" id="status">tap to wake</div>
+    <div class="hint" id="hint">click the orb or press space</div>
+  </footer>
+
+  <form class="composer" id="composer" autocomplete="off">
+    <input id="textInput" placeholder="type to ANVI…  (enter to send, esc to close)" />
+  </form>
+
+  <button class="corner" id="keyboardBtn" title="Type a message (T)" aria-label="Type a message">⌨</button>
+
+  <script src="script.js"></script>
+</body>
+</html>

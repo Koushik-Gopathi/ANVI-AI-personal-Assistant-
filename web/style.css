@@ -1,0 +1,182 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  --bg: #080b14;
+  --cyan: #5fe3ff;
+  --cyan-dim: rgba(95, 227, 255, 0.45);
+  --text: #d6e4ee;
+  --muted: #6c7a88;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: radial-gradient(ellipse at 50% 45%, #0d1422 0%, var(--bg) 60%);
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  user-select: none;
+}
+
+#orb {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  cursor: pointer;
+}
+
+/* ---------- top: what you said ---------- */
+.transcript {
+  position: fixed;
+  top: 5vh;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(720px, 90vw);
+  text-align: center;
+  pointer-events: none;
+  transition: opacity 0.5s ease;
+}
+
+.transcript .label {
+  font-size: 10px;
+  letter-spacing: 0.35em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.transcript .text {
+  font-size: clamp(14px, 1.6vw, 18px);
+  font-weight: 300;
+  font-style: italic;
+  color: var(--text);
+  line-height: 1.45;
+  min-height: 1.45em;
+}
+
+.transcript.empty {
+  opacity: 0;
+}
+
+.transcript .text.interim {
+  color: var(--muted);
+}
+
+/* ---------- ANVI's reply caption ---------- */
+.reply {
+  position: fixed;
+  bottom: calc(5vh + 64px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(640px, 88vw);
+  text-align: center;
+  font-size: 14px;
+  font-weight: 300;
+  line-height: 1.5;
+  color: rgba(214, 228, 238, 0.72);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.6s ease;
+}
+
+.reply.show {
+  opacity: 1;
+}
+
+/* ---------- bottom: status ---------- */
+.status-wrap {
+  position: fixed;
+  bottom: 5vh;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+  pointer-events: none;
+}
+
+.status {
+  font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  font-size: 13px;
+  letter-spacing: 0.12em;
+  color: var(--cyan);
+  text-shadow: 0 0 10px rgba(95, 227, 255, 0.55);
+  transition: color 0.3s;
+}
+
+.status.error {
+  color: #ff7a8a;
+  text-shadow: 0 0 10px rgba(255, 90, 110, 0.5);
+}
+
+.status.muted {
+  color: var(--muted);
+  text-shadow: none;
+}
+
+.hint {
+  margin-top: 8px;
+  font-size: 9px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: #3e4a57;
+}
+
+/* ---------- text composer ---------- */
+.composer {
+  position: fixed;
+  left: 50%;
+  bottom: calc(5vh + 110px);
+  transform: translate(-50%, 12px);
+  width: min(560px, 90vw);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+.composer.open {
+  opacity: 1;
+  transform: translate(-50%, 0);
+  pointer-events: auto;
+}
+
+.composer input {
+  width: 100%;
+  padding: 12px 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(95, 227, 255, 0.25);
+  background: rgba(8, 14, 24, 0.75);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+  backdrop-filter: blur(8px);
+}
+
+.composer input:focus {
+  border-color: rgba(95, 227, 255, 0.6);
+  box-shadow: 0 0 18px rgba(95, 227, 255, 0.15);
+}
+
+.corner {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  border: 1px solid rgba(95, 227, 255, 0.15);
+  background: rgba(8, 14, 24, 0.5);
+  color: var(--cyan-dim);
+  font-size: 17px;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.corner:hover {
+  color: var(--cyan);
+  border-color: rgba(95, 227, 255, 0.5);
+}

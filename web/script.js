@@ -24,16 +24,12 @@ let abortCtl = null;
 let errorTimer = null;
 let statusDetail = ""; // e.g. "searching: gold rate today" while thinking
 
-// On phones the always-on wake word is off: Android beeps every time the
-// recognizer restarts, and it drains the battery. Tap the orb instead.
 const IS_TOUCH = matchMedia("(pointer: coarse)").matches;
-const SpeechRec = IS_TOUCH ? null : window.SpeechRecognition || window.webkitSpeechRecognition;
+let passive = false; // asleep but listening for "ANVI"
 
 const STATUS = {
-  sleep: IS_TOUCH
-    ? ["tap to talk", "tap the orb"]
-    : SpeechRec ? ["say “ANVI” to wake", "or click the orb · space"] : ["tap to wake", "click the orb or press space"],
-  listening: ["listening...", IS_TOUCH ? "speak naturally · tap to stop" : "speak naturally · say “ANVI” to sleep"],
+  sleep: ["say “ANVI” to wake", IS_TOUCH ? "or tap the orb" : "or click the orb · space"],
+  listening: ["listening...", "speak naturally · say “ANVI” to sleep"],
   thinking: ["thinking...", "one moment"],
   speaking: ["speaking...", "tap to interrupt"],
 };
@@ -45,7 +41,12 @@ function setState(next) {
 }
 
 function renderStatus() {
-  const [s, h] = STATUS[state];
+  let [s, h] = STATUS[state];
+  if (state === "sleep" && !passive) {
+    [s, h] = audioCtx && audioCtx.state === "running"
+      ? ["tap to wake", IS_TOUCH ? "tap the orb" : "click the orb or press space"]
+      : ["tap anywhere to start", "one tap lets ANVI listen for its name"];
+  }
   statusEl.textContent = state === "thinking" && statusDetail ? statusDetail.replace(/\.+$/, "") + "..." : s;
   statusEl.className = "status" + (state === "sleep" ? " muted" : "");
   hintEl.textContent = h;
@@ -87,6 +88,10 @@ function ensureAudioCtx() {
     outAnalyser = audioCtx.createAnalyser();
     outAnalyser.fftSize = 1024;
     outAnalyser.connect(audioCtx.destination);
+    const unlock = audioCtx.createBufferSource();
+    unlock.buffer = audioCtx.createBuffer(1, 1, 22050);
+    unlock.connect(audioCtx.destination);
+    unlock.start(0);
   }
   if (audioCtx.state === "suspended") audioCtx.resume();
   return audioCtx;
@@ -142,11 +147,16 @@ function startRecorder() {
   rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
   rec.onstop = () => {
     if (rec.discard) {
-      // silence timeout: just start a fresh take
-      if (awake && state === "listening" && !recorder) startRecorder();
+      // silence timeout or noise: just start a fresh take
+      const listeningNow = awake ? state === "listening" : state === "sleep" && passive && !wakeChecking;
+      if (listeningNow && !recorder && micStream) startRecorder();
       return;
     }
-    handleUtterance(new Blob(chunks, { type: rec.mimeType || MIME || "audio/webm" }));
+    const blob = new Blob(chunks, { type: rec.mimeType || MIME || "audio/webm" });
+    if (!awake) return checkWakeWord(blob);
+    // phones play audio through the quiet earpiece while the mic is open
+    if (IS_TOUCH) closeMic();
+    handleUtterance(blob);
   };
   rec.start(200);
   recorder = rec;
@@ -161,15 +171,17 @@ function stopRecorder(discard) {
   recorder = null;
 }
 
-function beginListening() {
+async function beginListening() {
   if (!awake) return setState("sleep");
   setState("listening");
-  startRecorder();
+  if (!micStream && !(await openMic())) return goToSleep();
+  if (awake && state === "listening" && !recorder) startRecorder();
 }
 
 // runs every 40ms (keeps working when the tab is in the background)
 setInterval(() => {
-  if (state !== "listening" || !recorder || !micAnalyser) return;
+  const asleepListening = !awake && state === "sleep" && passive;
+  if (!(state === "listening" || asleepListening) || !recorder || !micAnalyser) return;
   const dt = 40;
   const level = rms(micAnalyser);
   const now = performance.now();
@@ -184,17 +196,23 @@ setInterval(() => {
     if (!vad.speaking && vad.voicedMs >= 160) {
       vad.speaking = true;
       vad.startedAt = now;
+      vad.totalVoicedMs = vad.voicedMs;
     }
   } else {
     vad.voicedMs = Math.max(0, vad.voicedMs - dt / 2);
     if (vad.speaking) vad.silenceMs += dt;
   }
 
-  if (vad.speaking && (vad.silenceMs >= 900 || now - vad.startedAt > 25000)) {
-    if (vad.totalVoicedMs < 400) {
-      stopRecorder(true); // a cough, click or bump: too short to be speech, keep listening
+  // asleep: only short phrases can be "ANVI ..." (long talk nearby is ignored)
+  const endSilence = asleepListening ? 600 : 900;
+  const maxLength = asleepListening ? 4500 : 25000;
+  if (vad.speaking && (vad.silenceMs >= endSilence || now - vad.startedAt > maxLength)) {
+    const tooShort = vad.totalVoicedMs < 250; // a click or bump
+    const tooLong = asleepListening && now - vad.startedAt > maxLength;
+    if (tooShort || tooLong) {
+      stopRecorder(true);
     } else {
-      setState("thinking");
+      if (!asleepListening) setState("thinking");
       stopRecorder(false);
     }
   } else if (!vad.speaking && now - vad.recStart > 12000) {
@@ -239,6 +257,7 @@ async function sendText(text) {
   ensureAudioCtx();
   cancelTurn();
   stopRecorder(true);
+  if (IS_TOUCH) closeMic();
   const id = ++turnId;
   setState("thinking");
   try {
@@ -246,7 +265,7 @@ async function sendText(text) {
   } catch (err) {
     if (err.name === "AbortError" || id !== turnId) return;
     showError(err.message || "connection lost — is main.py running?");
-    awake ? beginListening() : setState("sleep");
+    awake ? beginListening() : backToSleepListening();
   }
 }
 
@@ -311,7 +330,7 @@ async function converse(text, id) {
   await queue.finished();
   if (id !== turnId) return;
   currentQueue = null;
-  awake ? beginListening() : setState("sleep");
+  awake ? beginListening() : backToSleepListening();
 }
 
 // Plays streamed MP3 clips back to back on the AudioContext timeline, so
@@ -463,7 +482,7 @@ codeBtn.addEventListener("click", () => (codeIsOpen() ? closeCode() : openCode()
 // ---------------------------------------------------------------------------
 // While asleep the browser's built-in speech recognizer listens for the name
 // (Edge/Chrome only). While awake, the Deepgram transcript is checked instead.
-const WAKE_RE = /\b(?:an+[vb](?:i|ee|y|ie|ey|e)?|en+v(?:y|i|ee|ie)|and v|an v)\b/;
+const WAKE_RE = /\b(?:an+[vb](?:i|ee|y|ie|ey)|an v|and v)\b/; // Nova-3 usually writes ANVI exactly
 const SLEEP_WORDS = new Set(
   "hey hi ok okay go to sleep bye goodbye good night stop thanks thank you that s all please now shut down standby pause the a".split(" ")
 );
@@ -479,58 +498,62 @@ function isSleepCommand(text) {
   return rest.length === 0;
 }
 
-let wakeRec = null;
-let wakeWanted = false;
-let wakeFailures = 0;
+// While asleep the mic stays open and each short phrase goes to the same
+// speech-to-text as normal questions; if it contains "ANVI", ANVI wakes up
+// (and "ANVI, what's the time?" is answered straight away).
+let wakeChecking = false;
+let passiveToken = 0;
 
-function startWakeListener() {
-  if (!SpeechRec) return;
-  wakeWanted = true;
-  if (wakeRec) return;
-
-  const rec = new SpeechRec();
-  rec.lang = "en-IN";
-  rec.continuous = true;
-  rec.interimResults = true;
-  rec.maxAlternatives = 3;
-
-  rec.onresult = (e) => {
-    wakeFailures = 0;
-    if (awake || state !== "sleep") return;
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      for (const alt of e.results[i]) {
-        if (hasWakeWord(alt.transcript)) return wakeUp();
-      }
-    }
-  };
-  rec.onerror = (e) => {
-    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
-      wakeWanted = false;
-      showError("voice wake needs microphone access");
-    } else if (e.error !== "no-speech" && e.error !== "aborted") {
-      wakeFailures++;
-    }
-  };
-  rec.onend = () => {
-    if (wakeRec === rec) wakeRec = null;
-    if (wakeWanted) setTimeout(startWakeListener, wakeFailures ? Math.min(10000, 1000 * wakeFailures) : 200);
-  };
-
-  try {
-    rec.start();
-    wakeRec = rec;
-  } catch (_) {
-    wakeRec = null;
-  }
+function afterWakeWord(text) {
+  const m = new RegExp(WAKE_RE.source, "i").exec(text);
+  if (!m) return "";
+  const rest = text.slice(m.index + m[0].length).replace(/^[\s,.!?:;-]+/, "").trim();
+  return rest.split(/\s+/).filter(Boolean).length >= 2 ? rest : "";
 }
 
-function stopWakeListener() {
-  wakeWanted = false;
-  if (!wakeRec) return;
-  const rec = wakeRec;
-  wakeRec = null;
-  rec.onend = null;
-  try { rec.abort(); } catch (_) {}
+async function checkWakeWord(blob) {
+  wakeChecking = true;
+  try {
+    const form = new FormData();
+    form.append("audio", blob, "wake.webm");
+    form.append("mime_type", blob.type);
+    form.append("purpose", "wake");
+    const res = await fetch("/api/transcribe", { method: "POST", body: form });
+    if (res.status === 401) {
+      passive = false;
+      return showError("this phone isn't paired — scan the QR code on your PC");
+    }
+    const text = res.ok ? (await res.json()).transcript || "" : "";
+    // "ANVI, go to sleep" while already asleep: nothing to do
+    if (!awake && state === "sleep" && hasWakeWord(text) && !(isSleepCommand(text) && afterWakeWord(text))) {
+      wakeChecking = false;
+      return wakeUp(afterWakeWord(text));
+    }
+  } catch (_) {
+    // offline for a moment: keep listening
+  } finally {
+    wakeChecking = false;
+  }
+  if (!awake && state === "sleep" && passive && !recorder && micStream) startRecorder();
+}
+
+async function startPassive() {
+  const token = ++passiveToken;
+  if (awake) return;
+  if (!audioCtx || audioCtx.state !== "running") {
+    passive = false; // needs one tap first
+    return renderStatus();
+  }
+  const ok = await openMic();
+  if (token !== passiveToken || awake) return;
+  passive = ok;
+  renderStatus();
+  if (ok && state === "sleep" && !recorder && !wakeChecking) startRecorder();
+}
+
+function backToSleepListening() {
+  setState("sleep");
+  startPassive();
 }
 
 function chime(up) {
@@ -568,14 +591,17 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && awake) keepScreenOn(true);
 });
 
-async function wakeUp() {
+async function wakeUp(request = "") {
   if (awake) return;
-  stopWakeListener();
+  passiveToken++;
+  passive = false;
+  stopRecorder(true);
   ensureAudioCtx();
-  if (!(await openMic())) return startWakeListener();
+  if (!(await openMic())) return startPassive();
   awake = true;
   keepScreenOn(true);
   chime(true);
+  if (request) return sendText(request); // "ANVI, what's the time?"
   setState("listening");
   setTimeout(() => awake && state === "listening" && !recorder && beginListening(), 300); // skip the chime
 }
@@ -584,10 +610,10 @@ function goToSleep() {
   cancelTurn();
   awake = false;
   keepScreenOn(false);
-  closeMic();
+  stopRecorder(true);
   setState("sleep");
   chime(false);
-  startWakeListener();
+  startPassive(); // keep listening for "ANVI"
 }
 
 // ---------------------------------------------------------------------------
@@ -623,14 +649,16 @@ function showPhoneTab(mode) {
 async function openPhoneModal() {
   phoneModal.hidden = false;
   try {
-    const [info] = await Promise.all([
+    const [info, appConfig] = await Promise.all([
       fetch("/api/phone").then((r) => r.json()),
+      fetch("/api/app-config").then((r) => r.json()),
       window.QRCode ? null : loadScript("https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js").catch(() => null),
     ]);
     if (!info.enabled) {
       $("addrLan").textContent = "Phone access is off (ANVI_PHONE=0 in .env).";
       return;
     }
+    drawQr($("qrApp"), appConfig.qr);
     drawQr($("qrLan"), info.lan.pair_url);
     $("addrLan").textContent = info.lan.address;
     const pub = info.public;
@@ -658,8 +686,7 @@ async function toggle() {
   if (state === "speaking" || state === "thinking") {
     // interrupt and listen again
     cancelTurn();
-    if (!awake) return setState("sleep");
-    if (!(await openMic())) return;
+    if (!awake) return backToSleepListening();
     return beginListening();
   }
 
@@ -717,8 +744,19 @@ window.addEventListener("keydown", (e) => {
 });
 
 // audio can only start after a click/keypress; unlock it on the first one
-["pointerdown", "keydown"].forEach((ev) => window.addEventListener(ev, ensureAudioCtx, { once: true }));
-startWakeListener();
+// Browsers only allow audio (and listening) after the first tap or key press.
+let started = false;
+async function firstInteraction() {
+  if (started) return;
+  started = true;
+  const ac = ensureAudioCtx();
+  try { await ac.resume(); } catch (_) {}
+  if (!awake && state === "sleep") startPassive();
+}
+["pointerdown", "keydown"].forEach((ev) => window.addEventListener(ev, firstInteraction, { once: true }));
+
+// The desktop app allows audio without a click, so start listening for "ANVI" immediately.
+if (new URLSearchParams(location.search).get("app") === "desktop") firstInteraction();
 
 fetch("/api/health")
   .then((r) => r.json())

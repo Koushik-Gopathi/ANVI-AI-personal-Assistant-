@@ -22,8 +22,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-BASE_DIR = Path(__file__).resolve().parent
-WEB_DIR = BASE_DIR / "web"
+# BASE_DIR holds .env, .anvi/ and generated/; WEB_DIR the UI files (bundled inside ANVI.exe when packaged)
+BASE_DIR = Path(os.getenv("ANVI_HOME") or Path(__file__).resolve().parent)
+WEB_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "web"
 load_dotenv(BASE_DIR / ".env")  # before importing modules that read the environment
 
 import requests  # noqa: E402
@@ -49,7 +50,8 @@ DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "openai/gpt-oss-20b")
-STT_MODEL = os.getenv("DEEPGRAM_STT_MODEL", "nova-2")
+STT_MODEL = os.getenv("DEEPGRAM_STT_MODEL", "nova-3")
+STT_LANGUAGE = os.getenv("DEEPGRAM_STT_LANGUAGE", "en-IN")  # Indian English: far fewer mis-hearings
 TTS_VOICE = os.getenv("DEEPGRAM_TTS_VOICE", "aura-asteria-en")
 PORT = int(os.getenv("APP_PORT", "8000"))
 PHONE_ENABLED = os.getenv("ANVI_PHONE", "1") == "1"
@@ -65,12 +67,13 @@ def transcribe(audio_bytes: bytes, mime_type: str) -> str:
     if not DEEPGRAM_API_KEY:
         raise RuntimeError("DEEPGRAM_API_KEY missing in .env")
 
-    params = {"model": STT_MODEL, "smart_format": "true", "punctuate": "true", "language": "en"}
-    # boost recognition of the wake/sleep word
+    params = {"model": STT_MODEL, "smart_format": "true", "punctuate": "true", "language": STT_LANGUAGE}
+    # help it spell the wake/sleep word; nova-2's "keywords" boost was strong enough to
+    # turn normal speech into "ANVI" ("Indus Valley" -> "ANVI"), so only a light hint there
     if STT_MODEL.startswith("nova-3"):
         params["keyterm"] = "ANVI"
     else:
-        params["keywords"] = "ANVI:3"
+        params["keywords"] = "ANVI:1"
 
     response = http.post(
         "https://api.deepgram.com/v1/listen",
@@ -247,7 +250,8 @@ def system_prompt(on_phone: bool = False) -> str:
     loc = weather.home_location().get("name") or "unknown"
     return (
         "You are ANVI, a smart, warm personal voice assistant running on the user's Windows PC. "
-        "Your replies are spoken aloud: answer in 1-3 short natural sentences, with no markdown, lists, "
+        "Your replies are spoken aloud: answer in 1-3 short natural sentences (under 60 words unless the user "
+        "asks for detail), with no markdown, bullet points, numbered lists, "
         "emojis, tables or URLs. Write numbers as digits with units (like ₹15,458 per gram or 27°C) and "
         "round them sensibly; they are read aloud correctly. "
         "You can search the web, get news and weather, and control the PC with your tools. "
@@ -583,11 +587,14 @@ def chat_events(text: str, speak: bool, on_phone: bool = False):
 
     speech = SpeechStream(speak)
     full, spoken_len, seq = "", 0, 0
+    t0 = time.time()
+    marks: dict[str, float] = {}
     has_code = announced_code = False
 
     def audio():
         nonlocal seq
         for clip in speech.take():
+            marks.setdefault("first_audio", time.time() - t0)
             yield event(t="audio", seq=seq, data=clip)
             seq += 1
 
@@ -621,6 +628,7 @@ def chat_events(text: str, speak: bool, on_phone: bool = False):
             if kind == "error":
                 raise data[0]
             if kind == "text":
+                marks.setdefault("first_text", time.time() - t0)
                 full += data[0]
                 visible, has_code = visible_text(full, final=False)
                 if has_code:
@@ -660,9 +668,12 @@ def chat_events(text: str, speak: bool, on_phone: bool = False):
         print(f"ANVI > {spoken}" + (f"  [+{len(code)} code block(s)]" if code else ""))
 
         for clip in speech.take(block=True):
+            marks.setdefault("first_audio", time.time() - t0)
             yield event(t="audio", seq=seq, data=clip)
             seq += 1
         yield event(t="done")
+        timing = "  ".join(f"{k}={v:.1f}s" for k, v in marks.items())
+        print(f"  timing: {timing}  total={time.time() - t0:.1f}s")
     except Exception as e:  # noqa: BLE001
         print("ERROR:", e)
         yield event(t="error", error=str(e))
@@ -767,14 +778,18 @@ def health():
 # Plain `def` endpoints run in FastAPI's threadpool, so blocking HTTP calls
 # don't freeze the server.
 @app.post("/api/transcribe")
-def api_transcribe(audio: UploadFile = File(...), mime_type: str = Form("audio/webm")):
+def api_transcribe(audio: UploadFile = File(...), mime_type: str = Form("audio/webm"), purpose: str = Form("")):
     try:
         audio_bytes = audio.file.read()
         if len(audio_bytes) < 1000:
             return {"transcript": ""}
+        started = time.time()
         transcript = transcribe(audio_bytes, mime_type)
-        if transcript:
-            print(f"\nYOU  > {transcript}")
+        took = f"(speech-to-text {time.time() - started:.1f}s, {len(audio_bytes) // 1024} KB)"
+        if transcript and purpose == "wake":
+            print(f"  asleep, heard: {transcript}   {took}")
+        elif transcript:
+            print(f"\nYOU  > {transcript}   {took}")
         return {"transcript": transcript}
     except Exception as e:  # noqa: BLE001
         return api_error(e)
@@ -790,6 +805,44 @@ def api_chat(body: ChatIn, request: Request):
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
+
+
+class ToolIn(BaseModel):
+    name: str
+    args: dict = {}
+    user_text: str = ""
+    turn: int = 0
+
+
+# PC actions the Android app may ask this PC to perform (its own brain runs on the phone)
+PHONE_APP_TOOLS = {"open_app", "close_app", "open_website", "play_youtube", "set_volume", "media_control",
+                   "take_screenshot", "system_info", "find_files", "open_path", "lock_pc", "power_action"}
+
+
+@app.post("/api/tool")
+def api_tool(body: ToolIn):
+    if body.name not in PHONE_APP_TOOLS:
+        return JSONResponse({"error": f"{body.name} can't be run remotely"}, status_code=403)
+    result = run_tool(body.name, body.args, {"turn": body.turn, "user_text": body.user_text})
+    print(f"  phone app -> {body.name}({json.dumps(body.args, ensure_ascii=False)}) -> {json.dumps(result)[:160]}")
+    return {"result": result}
+
+
+@app.get("/api/app-config")
+def app_config(request: Request):
+    """Everything the Android app needs, packed into the setup QR code (PC only)."""
+    if not is_local(request):
+        return JSONResponse({"error": "open this on the PC"}, status_code=403)
+    config = {
+        "anvi": 1,
+        "groq": GROQ_API_KEY or "",
+        "deepgram": DEEPGRAM_API_KEY or "",
+        "tavily": os.getenv("TAVILY_API_KEY", ""),
+        "token": phone.pairing_secret(),
+        "lan": f"https://{phone.lan_ip()}:{PHONE_PORT}" if PHONE_ENABLED else "",
+        "public": PUBLIC_URL,
+    }
+    return {"qr": json.dumps(config, separators=(",", ":"))}
 
 
 @app.post("/api/reset")

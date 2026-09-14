@@ -20,3 +20,11 @@ generated/
 
 # phone pairing secret and HTTPS certificate
 .anvi/
+
+# desktop app build output
+build/
+dist/
+*.spec
+
+# built Android app
+ANVI.apk

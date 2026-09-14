@@ -9,11 +9,12 @@ phone gets by scanning the QR code shown on the PC.
 import datetime
 import hmac
 import ipaddress
+import os
 import secrets
 import socket
 from pathlib import Path
 
-DATA_DIR = Path(__file__).resolve().parent / ".anvi"
+DATA_DIR = Path(os.getenv("ANVI_HOME") or Path(__file__).resolve().parent) / ".anvi"
 SECRET_FILE = DATA_DIR / "pairing_secret"
 CERT_FILE = DATA_DIR / "cert.pem"
 KEY_FILE = DATA_DIR / "key.pem"

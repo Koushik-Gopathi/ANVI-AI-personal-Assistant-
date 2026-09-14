@@ -55,6 +55,18 @@
       <div class="modal-tabs">
         <button data-mode="lan" class="active">Hotspot / same Wi-Fi</button>
         <button data-mode="public">Anywhere (Tailscale)</button>
+        <button data-mode="app">Android app</button>
+      </div>
+
+      <div class="modal-body" data-panel="app" hidden>
+        <div class="qr" id="qrApp"></div>
+        <ol>
+          <li>Install the ANVI app on your Android phone.</li>
+          <li>Open it and tap <b>Scan setup code from PC</b>, then scan this code.</li>
+          <li>Done. The app talks to Groq and Deepgram directly, so it works anywhere; PC actions reach this
+            PC whenever it's on the same network (or Tailscale).</li>
+        </ol>
+        <p class="modal-note warn">This code contains your API keys. Never share it or post a photo of it.</p>
       </div>
 
       <div class="modal-body" data-panel="lan">

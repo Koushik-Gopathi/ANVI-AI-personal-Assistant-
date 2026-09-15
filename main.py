@@ -1101,9 +1101,16 @@ async def serve() -> None:
 
     configs = [uvicorn.Config(app, host="127.0.0.1", port=PORT, log_level="warning")]
     if PHONE_ENABLED:
-        cert, key = phone.ensure_certificate(phone.lan_ip())
-        configs.append(uvicorn.Config(app, host="0.0.0.0", port=PHONE_PORT, log_level="warning",
-                                      ssl_certfile=cert, ssl_keyfile=key))
+        # phone access is optional: a certificate problem must not stop Karen on this PC
+        for attempt in range(3):
+            try:
+                cert, key = phone.ensure_certificate(phone.lan_ip())
+                configs.append(uvicorn.Config(app, host="0.0.0.0", port=PHONE_PORT, log_level="warning",
+                                              ssl_certfile=cert, ssl_keyfile=key))
+                break
+            except OSError as e:  # e.g. antivirus briefly locking a file in .anvi
+                print(f"phone access unavailable ({e}); retrying" if attempt < 2 else f"phone access off: {e}")
+                await asyncio.sleep(1)
     await asyncio.gather(*(uvicorn.Server(c).serve() for c in configs))
 
 

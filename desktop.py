@@ -98,7 +98,7 @@ def start_server() -> None:
         return
     threading.Thread(target=main._warm_up, daemon=True).start()
     threading.Thread(target=lambda: main.asyncio.run(main.serve()), daemon=True).start()
-    for _ in range(100):
+    for _ in range(600):  # up to 60 s: startup is slow when the PC is busy
         if _server_up():
             return
         time.sleep(0.1)

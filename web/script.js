@@ -1,4 +1,4 @@
-// ANVI web client
+// Karen web client
 // States: sleep -> listening -> thinking -> speaking -> listening ...
 // Hands-free: once woken, the mic stays open and a small voice-activity
 // detector decides when you started and stopped talking.
@@ -25,11 +25,11 @@ let errorTimer = null;
 let statusDetail = ""; // e.g. "searching: gold rate today" while thinking
 
 const IS_TOUCH = matchMedia("(pointer: coarse)").matches;
-let passive = false; // asleep but listening for "ANVI"
+let passive = false; // asleep but listening for "Karen"
 
 const STATUS = {
-  sleep: ["say “ANVI” to wake", IS_TOUCH ? "or tap the orb" : "or click the orb · space"],
-  listening: ["listening...", "speak naturally · say “ANVI” to sleep"],
+  sleep: ["say “Karen” to wake", IS_TOUCH ? "or tap the orb" : "or click the orb · space"],
+  listening: ["listening...", "speak naturally · say “Karen” to sleep"],
   thinking: ["thinking...", "one moment"],
   speaking: ["speaking...", "tap to interrupt"],
 };
@@ -45,7 +45,7 @@ function renderStatus() {
   if (state === "sleep" && !passive) {
     [s, h] = audioCtx && audioCtx.state === "running"
       ? ["tap to wake", IS_TOUCH ? "tap the orb" : "click the orb or press space"]
-      : ["tap anywhere to start", "one tap lets ANVI listen for its name"];
+      : ["tap anywhere to start", "one tap lets Karen listen for her name"];
   }
   statusEl.textContent = state === "thinking" && statusDetail ? statusDetail.replace(/\.+$/, "") + "..." : s;
   statusEl.className = "status" + (state === "sleep" ? " muted" : "");
@@ -53,7 +53,7 @@ function renderStatus() {
 }
 
 function showError(msg) {
-  console.error("ANVI:", msg);
+  console.error("Karen:", msg);
   statusEl.textContent = msg.length > 90 ? msg.slice(0, 90) + "…" : msg;
   statusEl.className = "status error";
   clearTimeout(errorTimer);
@@ -66,6 +66,22 @@ function showError(msg) {
 function showYou(text) {
   youText.textContent = text;
   transcriptEl.classList.toggle("empty", !text);
+}
+
+const stepsEl = $("steps");
+
+function clearSteps() {
+  stepsEl.innerHTML = "";
+  stepsEl.hidden = true;
+}
+
+function addStep(step) {
+  const li = document.createElement("li");
+  li.className = step.outcome === "done" ? "ok" : step.outcome === "waiting for your OK" ? "wait" : "bad";
+  li.textContent = step.outcome === "done" ? step.text : `${step.text} — ${step.outcome}`;
+  stepsEl.appendChild(li);
+  while (stepsEl.children.length > 6) stepsEl.firstChild.remove();
+  stepsEl.hidden = false;
 }
 
 function showReply(text) {
@@ -203,7 +219,7 @@ setInterval(() => {
     if (vad.speaking) vad.silenceMs += dt;
   }
 
-  // asleep: only short phrases can be "ANVI ..." (long talk nearby is ignored)
+  // asleep: only short phrases can be "Karen ..." (long talk nearby is ignored)
   const endSilence = asleepListening ? 600 : 900;
   const maxLength = asleepListening ? 4500 : 25000;
   if (vad.speaking && (vad.silenceMs >= endSilence || now - vad.startedAt > maxLength)) {
@@ -215,7 +231,7 @@ setInterval(() => {
       if (!asleepListening) setState("thinking");
       stopRecorder(false);
     }
-  } else if (!vad.speaking && now - vad.recStart > 12000) {
+  } else if (!vad.speaking && vad.voicedMs === 0 && now - vad.recStart > (asleepListening ? 3000 : 12000)) {
     stopRecorder(true); // nothing said for a while; restart to keep takes small
   }
 }, 40);
@@ -272,6 +288,7 @@ async function sendText(text) {
 async function converse(text, id) {
   showYou(text);
   showReply("");
+  clearSteps();
   statusDetail = "";
   setState("thinking");
   abortCtl = abortCtl && !abortCtl.signal.aborted ? abortCtl : new AbortController();
@@ -283,7 +300,7 @@ async function converse(text, id) {
     signal: abortCtl.signal,
   });
   if (!res.ok) {
-    let msg = "ANVI could not answer";
+    let msg = "Karen could not answer";
     try { msg = (await res.json()).error || msg; } catch (_) {}
     throw new Error(msg);
   }
@@ -299,6 +316,7 @@ async function converse(text, id) {
     if (ev.t === "caption") showReply(ev.text);
     else if (ev.t === "audio") queue.add(ev.data);
     else if (ev.t === "code") showCode(ev.blocks);
+    else if (ev.t === "step") addStep(ev);
     else if (ev.t === "error") failure = ev.error;
     else if (ev.t === "status") {
       statusDetail = ev.text;
@@ -334,7 +352,7 @@ async function converse(text, id) {
 }
 
 // Plays streamed MP3 clips back to back on the AudioContext timeline, so
-// ANVI starts talking after the first sentence instead of the whole reply.
+// Karen starts talking after the first sentence instead of the whole reply.
 class SpeechQueue {
   constructor(id) {
     this.id = id;
@@ -355,7 +373,7 @@ class SpeechQueue {
         await Promise.race([ac.resume(), new Promise((r) => setTimeout(r, 400))]);
         if (ac.state !== "running") {
           this.blocked = true;
-          return showError("click the page once to enable ANVI's voice");
+          return showError("click the page once to enable Karen's voice");
         }
       }
       let buffer;
@@ -478,19 +496,20 @@ $("closeCodeBtn").addEventListener("click", closeCode);
 codeBtn.addEventListener("click", () => (codeIsOpen() ? closeCode() : openCode()));
 
 // ---------------------------------------------------------------------------
-// Wake word: say "ANVI" to wake up, say "ANVI" again to go to sleep
+// Wake word: say "Karen" to wake up, say "Karen" again to go to sleep
 // ---------------------------------------------------------------------------
 // While asleep the browser's built-in speech recognizer listens for the name
 // (Edge/Chrome only). While awake, the Deepgram transcript is checked instead.
-const WAKE_RE = /\b(?:an+[vb](?:i|ee|y|ie|ey)|an v|and v)\b/; // Nova-3 usually writes ANVI exactly
+// "Karen" as speech-to-text may spell it (Karen, Caren, Karan, Karin, Keren...)
+const WAKE_RE = /\b[kc](?:a|e|ae|ai)r+(?:e|a|i|y)n+\b/;
 const SLEEP_WORDS = new Set(
-  "hey hi ok okay go to sleep bye goodbye good night stop thanks thank you that s all please now shut down standby pause the a".split(" ")
+  "hey hi ok okay go to sleep bye by goodbye good night stop thanks thank you that s all please now shut down standby pause the a".split(" ")
 );
 
 const normalize = (text) => ` ${text.toLowerCase().replace(/[^a-z\s]/g, " ").replace(/\s+/g, " ")} `;
 const hasWakeWord = (text) => WAKE_RE.test(normalize(text));
 
-// "ANVI", "bye ANVI", "ANVI go to sleep" -> true;  "ANVI what's the time" -> false
+// "Karen", "bye Karen", "Karen go to sleep" -> true;  "Karen what's the time" -> false
 function isSleepCommand(text) {
   const n = normalize(text);
   if (!WAKE_RE.test(n)) return false;
@@ -499,8 +518,8 @@ function isSleepCommand(text) {
 }
 
 // While asleep the mic stays open and each short phrase goes to the same
-// speech-to-text as normal questions; if it contains "ANVI", ANVI wakes up
-// (and "ANVI, what's the time?" is answered straight away).
+// speech-to-text as normal questions; if it contains "Karen", Karen wakes up
+// (and "Karen, what's the time?" is answered straight away).
 let wakeChecking = false;
 let passiveToken = 0;
 
@@ -524,7 +543,7 @@ async function checkWakeWord(blob) {
       return showError("this phone isn't paired — scan the QR code on your PC");
     }
     const text = res.ok ? (await res.json()).transcript || "" : "";
-    // "ANVI, go to sleep" while already asleep: nothing to do
+    // "Karen, go to sleep" while already asleep: nothing to do
     if (!awake && state === "sleep" && hasWakeWord(text) && !(isSleepCommand(text) && afterWakeWord(text))) {
       wakeChecking = false;
       return wakeUp(afterWakeWord(text));
@@ -601,7 +620,7 @@ async function wakeUp(request = "") {
   awake = true;
   keepScreenOn(true);
   chime(true);
-  if (request) return sendText(request); // "ANVI, what's the time?"
+  if (request) return sendText(request); // "Karen, what's the time?"
   setState("listening");
   setTimeout(() => awake && state === "listening" && !recorder && beginListening(), 300); // skip the chime
 }
@@ -613,7 +632,7 @@ function goToSleep() {
   stopRecorder(true);
   setState("sleep");
   chime(false);
-  startPassive(); // keep listening for "ANVI"
+  startPassive(); // keep listening for "Karen"
 }
 
 // ---------------------------------------------------------------------------
@@ -755,7 +774,7 @@ async function firstInteraction() {
 }
 ["pointerdown", "keydown"].forEach((ev) => window.addEventListener(ev, firstInteraction, { once: true }));
 
-// The desktop app allows audio without a click, so start listening for "ANVI" immediately.
+// The desktop app allows audio without a click, so start listening for "Karen" immediately.
 if (new URLSearchParams(location.search).get("app") === "desktop") firstInteraction();
 
 fetch("/api/health")

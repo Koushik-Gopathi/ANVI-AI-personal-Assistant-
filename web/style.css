@@ -539,3 +539,41 @@ body.code-open .corner-row {
     font-size: 15px;
   }
 }
+
+/* ---------- agent steps ---------- */
+.steps {
+  list-style: none;
+  width: min(520px, 100%);
+  max-height: 20vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font: 11.5px "Cascadia Mono", Consolas, ui-monospace, monospace;
+  color: #7f93a3;
+  pointer-events: none;
+}
+
+.steps li {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  animation: rise 0.3s ease;
+}
+
+.steps li::before {
+  display: inline-block;
+  width: 1.4em;
+  content: "✓";
+  color: #4fd19b;
+}
+
+.steps li.wait::before {
+  content: "?";
+  color: #e7c26b;
+}
+
+.steps li.bad::before {
+  content: "✕";
+  color: #ff7a8a;
+}

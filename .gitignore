@@ -27,4 +27,7 @@ dist/
 *.spec
 
 # built Android app
-ANVI.apk
+ANVI*.apk
+
+# Kotlin compiler session files
+mobile/android/.kotlin/

@@ -20,12 +20,36 @@ class ToolStarted extends BrainEvent {
   ToolStarted(this.name, this.args);
 }
 
-class _Retryable implements Exception {
-  final String message;
-  _Retryable(this.message);
+/// A finished tool step, for the activity list.
+class StepDone extends BrainEvent {
+  final String text;
+  final String outcome; // done | failed | waiting for your OK
+  StepDone(this.text, this.outcome);
 }
 
-/// Groq chat with tool calling, streamed. Runs entirely on the phone.
+class StatusUpdate extends BrainEvent {
+  final String text;
+  StatusUpdate(this.text);
+}
+
+class _Retryable implements Exception {
+  final String message;
+  final Duration wait;
+  _Retryable(this.message, this.wait);
+}
+
+// For requests to *do* something, text written before any tool ran is held back:
+// if it claims success without a tool call, it is dropped and the model is told to act.
+final _actionRequest = RegExp(
+    r'\b(delete|remove|create|make|open|close|run|install|move|copy|rename|write|save|send|type|set|start|stop|'
+    r'turn|change|download|lock|shut|restart|play|pause|call|message|text|whatsapp|remind|alarm|timer|navigate)\b',
+    caseSensitive: false);
+final _claimsDone = RegExp(
+    r'\b(done|deleted|removed|created|made|opened|closed|ran|installed|moved|copied|renamed|written|wrote|saved|'
+    r'sent|typed|started|stopped|turned|changed|downloaded|locked|playing|paused|called|has been|have been|is now)\b',
+    caseSensitive: false);
+
+/// Groq chat with tool calling, streamed. Runs on the phone; PC actions go through the PC.
 class Brain {
   final AnviConfig cfg;
   final http.Client client;
@@ -33,14 +57,16 @@ class Brain {
   final _history = <Map<String, dynamic>>[];
   int _turn = 0;
   static const _maxHistory = 16;
-  static const _tokenLimit = 7600; // Groq free tier: ~8k tokens/minute
-  static const _inputBudget = 4200;
+  static const _maxSteps = 12;
+  static const _tokenLimit = 7600; // Groq free tier: ~8k tokens/minute per model
+  static const _inputBudget = 5400;
+  final _freeAt = <String, DateTime>{};
 
   Brain(this.cfg, this.client, this.tools);
 
   void reset() => _history.clear();
 
-  List<Map<String, dynamic>> get _tools => [...phoneTools, if (cfg.hasPc) ...pcTools];
+  List<Map<String, dynamic>> get _tools => [...phoneTools, ...tools.pc.toolDefs];
 
   String _systemPrompt(String location) {
     final now = DateTime.now();
@@ -50,25 +76,31 @@ class Brain {
     final hour = now.hour % 12 == 0 ? 12 : now.hour % 12;
     final time = '${days[now.weekday - 1]}, ${now.day} ${months[now.month - 1]} ${now.year}, '
         '$hour:${now.minute.toString().padLeft(2, '0')} ${now.hour < 12 ? 'AM' : 'PM'}';
-    return 'You are ANVI, a smart, warm personal voice assistant running as an app on the user\'s Android phone. '
-        'Your replies are spoken aloud: answer in 1-3 short natural sentences (under 60 words unless the user asks '
-        'for detail), with no markdown, bullet points, numbered lists, emojis, tables or URLs. Write numbers as '
-        'digits with units (like ₹15,458 per gram or 27°C); they are read aloud correctly. '
-        'For anything that changes over time or that you are not sure about - prices and rates, news, sports, '
-        'events, releases, people\'s current roles - call web_search first and answer with the specific facts and '
-        'numbers you found, briefly naming the source. Never say you don\'t know or can\'t browse without searching '
-        'first. '
-        '${cfg.hasPc ? 'You can also control the user\'s Windows PC with the PC tools; those actions happen on the PC, so say "on your PC". Only take PC actions the user asked for in their latest message. ' : 'PC control is not set up in this app yet. '}'
-        'Never claim you did something unless a tool call in this turn actually did it and succeeded; if no tool '
-        'can do it, say honestly that you can\'t do that yet. '
-        'When the user asks for code, write complete working code in fenced code blocks with the language and a '
-        'filename on the opening fence line, like ```python hello.py; the code is shown on screen, not read aloud, '
-        'so outside the code write only one short sentence. '
+    final pc = tools.pc.toolDefs.isNotEmpty
+        ? 'Tools marked [on the PC] act on the user\'s Windows PC (commands, files, apps, typing, reminders); say '
+            '"on your PC" when you use them. '
+        : (cfg.hasPc
+            ? 'The user\'s PC is not reachable right now, so you cannot do anything on it; say so if asked. '
+            : 'PC control is not set up in this app. ');
+    return 'You are Karen, the user\'s personal AI agent, running as an app on their Android phone. You don\'t '
+        'just chat: you get things done with your tools - web search, speed tests, calls, messages, alarms, '
+        'timers, maps, and work on their PC. '
+        'For a task: work out the steps, call tools one after another, read every result, fix errors by trying '
+        'another way, and keep going until it is really finished. If a tool result says needs_confirmation, stop '
+        'and ask the user, describing exactly what will happen. Never claim you did something unless a tool result '
+        'shows it worked. Messages and calls only get prepared: tell the user to tap send or call. '
+        '$pc'
+        'For anything that changes over time or that you are unsure of - prices, news, sports, releases, people\'s '
+        'roles - search the web first and answer with the specific facts and numbers you found. '
+        'Your final reply is spoken aloud: 1-3 short natural sentences (under 60 words unless asked for detail), '
+        'no markdown, lists, emojis, tables or URLs. Write numbers as digits with units (like ₹15,458 or 27°C). '
+        'When the user asks for code, write complete code in fenced code blocks with the language and a filename on '
+        'the opening fence line, like ```python hello.py; outside the code write one short sentence. '
         'Current local date and time: $time. User\'s location: $location.';
   }
 
   int _estimate(List<Map<String, dynamic>> msgs) =>
-      msgs.fold<int>(0, (n, m) => n + jsonEncode(m).length) ~/ 3 + jsonEncode(_tools).length ~/ 3;
+      msgs.fold<int>(0, (n, m) => n + jsonEncode(m).length) ~/ 3 + jsonEncode(_tools).length ~/ 4;
 
   static final fence = RegExp(r'```([^\n`]*)\n(.*?)```', dotAll: true);
 
@@ -88,25 +120,59 @@ class Brain {
     return [system, ...msgs];
   }
 
-  /// One conversation turn: streams text deltas and tool notifications.
+  /// Keep a long task under the token budget: shorten old tool results, then drop old chat.
+  void _compact(List<Map<String, dynamic>> convo, int turnStart) {
+    if (_estimate(convo) <= _inputBudget) return;
+    final toolMsgs = convo.skip(turnStart).where((m) => m['role'] == 'tool').toList();
+    for (final m in toolMsgs.take(toolMsgs.length > 2 ? toolMsgs.length - 2 : 0)) {
+      final c = '${m['content']}';
+      if (c.length > 300) m['content'] = '${c.substring(0, 300)}… [shortened]';
+    }
+    while (_estimate(convo) > _inputBudget && turnStart > 2) {
+      convo.removeAt(1);
+      turnStart--;
+    }
+  }
+
+  static String _outcome(String name, Map<String, dynamic> result) {
+    if (result['needs_confirmation'] == true) return 'waiting for your OK';
+    if (result['error'] != null) return 'failed';
+    if (name == 'run_command' && result['exit_code'] != null && result['exit_code'] != 0) {
+      return 'exit code ${result['exit_code']}';
+    }
+    return 'done';
+  }
+
+  /// One conversation turn: streams text, tool, step and status events.
   Stream<BrainEvent> ask(String userText) async* {
     _turn++;
+    await tools.pc.refreshToolDefs();
+    final lastReply = _history.lastWhere((m) => m['role'] == 'assistant', orElse: () => {'content': ''})['content'];
     _history.add({'role': 'user', 'content': userText});
     final convo = await _conversation();
+    final turnStart = convo.length - 1;
     final executed = <String>{};
+    final wantsAction = _actionRequest.hasMatch(userText);
     var finalText = '';
     var noTools = false;
+    var nudged = false;
 
     try {
-      for (var step = 0; step < 5; step++) {
+      for (var step = 0; step < _maxSteps; step++) {
+        _compact(convo, turnStart);
         final calls = <int, Map<String, String>>{};
         var content = '';
-        await for (final delta in _streamWithFallback(convo, step < 4 && !noTools)) {
+        final hold = wantsAction && executed.isEmpty && !nudged;
+        await for (final delta in _streamWithFallback(convo, step < _maxSteps - 1 && !noTools)) {
+          if (delta.containsKey('_wait')) {
+            yield StatusUpdate('busy, continuing in ${delta['_wait']}s');
+            continue;
+          }
           final piece = delta['content'];
           if (piece is String && piece.isNotEmpty) {
             final text = content.isEmpty && finalText.isNotEmpty && !finalText.endsWith(' ') ? ' $piece' : piece;
             content += text;
-            yield TextDelta(text);
+            if (!hold) yield TextDelta(text);
           }
           for (final tc in (delta['tool_calls'] as List? ?? [])) {
             final slot = calls.putIfAbsent(tc['index'] ?? calls.length, () => {'id': '', 'name': '', 'args': ''});
@@ -116,6 +182,17 @@ class Brain {
             slot['args'] = slot['args']! + (fn['arguments'] ?? '');
           }
         }
+
+        if (hold && calls.isEmpty && _claimsDone.hasMatch(content)) {
+          nudged = true;
+          convo.add({
+            'role': 'system',
+            'content': 'You have not called any tool in this turn, so nothing has actually been done. Call the right '
+                'tool now to do what the user asked, or say honestly that you have not done it.',
+          });
+          continue;
+        }
+        if (hold && content.isNotEmpty) yield TextDelta(content);
 
         final fresh = calls.values.where((c) => !executed.contains(_key(c))).toList();
         if (calls.isNotEmpty && fresh.isEmpty) {
@@ -134,32 +211,36 @@ class Brain {
           'role': 'assistant',
           'content': content,
           'tool_calls': [
-            for (final c in fresh)
+            for (var i = 0; i < fresh.length; i++)
               {
-                'id': c['id'],
+                'id': fresh[i]['id']!.isEmpty ? 'call_${step}_$i' : fresh[i]['id'],
                 'type': 'function',
-                'function': {'name': c['name'], 'arguments': c['args']!.isEmpty ? '{}' : c['args']},
+                'function': {'name': fresh[i]['name'], 'arguments': fresh[i]['args']!.isEmpty ? '{}' : fresh[i]['args']},
               }
           ],
         });
-        for (final c in fresh) {
+        for (var i = 0; i < fresh.length; i++) {
+          final c = fresh[i];
           Map<String, dynamic> args;
           try {
-            args = Map<String, dynamic>.from(jsonDecode(c['args']!.isEmpty ? '{}' : c['args']!));
+            final decoded = jsonDecode(c['args']!.isEmpty ? '{}' : c['args']!);
+            args = decoded is Map ? Map<String, dynamic>.from(decoded) : {};
           } catch (_) {
             args = {};
           }
           yield ToolStarted(c['name']!, args);
-          final result = jsonEncode(await tools.run(c['name']!, args, userText, _turn));
+          final result = await tools.run(c['name']!, args, userText, _turn, '$lastReply');
+          yield StepDone(toolStatus(c['name']!, args), _outcome(c['name']!, result));
+          final text = jsonEncode(result);
           convo.add({
             'role': 'tool',
-            'tool_call_id': c['id'],
-            'content': result.length > 4500 ? result.substring(0, 4500) : result,
+            'tool_call_id': c['id']!.isEmpty ? 'call_${step}_$i' : c['id'],
+            'content': text.length > 4000 ? text.substring(0, 4000) : text,
           });
         }
       }
       if (finalText.trim().isEmpty) {
-        finalText = "Sorry, I couldn't come up with an answer. Could you ask that again?";
+        finalText = "Sorry, I couldn't finish that. Could you ask again?";
         yield TextDelta(finalText);
       }
     } finally {
@@ -187,27 +268,52 @@ class Brain {
     }
   }
 
+  /// Tries each model; when all are rate limited, waits (up to 45 s) for the first to free up.
   Stream<Map<String, dynamic>> _streamWithFallback(List<Map<String, dynamic>> msgs, bool useTools) async* {
     final models = [cfg.groqModel, if (cfg.fallbackModel != cfg.groqModel) cfg.fallbackModel];
-    for (final model in models) {
-      try {
-        yield* _stream(msgs, useTools, model);
-        return;
-      } on _Retryable {
-        continue;
+    for (var round = 0; round < 4; round++) {
+      for (final model in models) {
+        if ((_freeAt[model] ?? DateTime(2000)).isAfter(DateTime.now())) continue;
+        var started = false;
+        try {
+          await for (final delta in _stream(msgs, useTools, model)) {
+            started = true;
+            yield delta;
+          }
+          return;
+        } on _Retryable catch (e) {
+          if (started) rethrow;
+          _freeAt[model] = DateTime.now().add(e.wait);
+        }
+      }
+      final soonest = models.map((m) => _freeAt[m] ?? DateTime.now()).reduce((a, b) => a.isBefore(b) ? a : b);
+      final wait = soonest.difference(DateTime.now());
+      if (wait > const Duration(seconds: 45)) break;
+      if (wait > Duration.zero) {
+        yield {'_wait': wait.inSeconds + 1};
+        await Future.delayed(wait + const Duration(milliseconds: 500));
       }
     }
-    throw AnviError("I've hit the Groq rate limit. Give me a minute and ask again.");
+    throw AnviError("I've hit the free Groq limit for now. Give me a minute and ask again.");
+  }
+
+  static Duration _retryAfter(http.StreamedResponse response, String body) {
+    final header = double.tryParse(response.headers['retry-after'] ?? '');
+    if (header != null) return Duration(milliseconds: (header * 1000).round());
+    final m = RegExp(r'try again in (?:(\d+)m)?([\d.]+)s').firstMatch(body);
+    if (m == null) return const Duration(seconds: 20);
+    final seconds = int.parse(m.group(1) ?? '0') * 60 + double.parse(m.group(2)!);
+    return Duration(milliseconds: (seconds * 1000).round());
   }
 
   Stream<Map<String, dynamic>> _stream(List<Map<String, dynamic>> msgs, bool useTools, String model) async* {
-    final budget = (_tokenLimit - _estimate(msgs)).clamp(400, 3000);
+    final budget = (_tokenLimit - _estimate(msgs)).clamp(600, 3000);
     final request = http.Request('POST', Uri.parse('https://api.groq.com/openai/v1/chat/completions'))
       ..headers.addAll({'Authorization': 'Bearer ${cfg.groqKey}', 'Content-Type': 'application/json'})
       ..body = jsonEncode({
         'model': model,
         'messages': msgs,
-        'temperature': 0.6,
+        'temperature': 0.5,
         'max_completion_tokens': budget,
         'stream': true,
         if (model.startsWith('openai/gpt-oss')) 'reasoning_effort': 'low',
@@ -217,8 +323,9 @@ class Brain {
     final response = await client.send(request).timeout(const Duration(seconds: 30));
     if (response.statusCode != 200) {
       final body = await response.stream.bytesToString();
-      if (response.statusCode == 413 || response.statusCode == 429 || body.contains('tool_use_failed')) {
-        throw _Retryable('${response.statusCode}');
+      if (response.statusCode == 429) throw _Retryable('429', _retryAfter(response, body));
+      if (response.statusCode == 413 || response.statusCode == 503 || body.contains('tool_use_failed')) {
+        throw _Retryable('${response.statusCode}', const Duration(seconds: 2));
       }
       throw AnviError('Groq error ${response.statusCode}');
     }

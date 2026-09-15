@@ -19,24 +19,24 @@ class CodeBlock {
   CodeBlock(this.lang, this.filename, this.code);
 }
 
-// "ANVI" as speech-to-text writes it; Nova-3 with the ANVI keyterm usually spells it exactly
-final _wakeRe = RegExp(r'\b(?:an+[vb](?:i|ee|y|ie|ey)|an v|and v)\b', caseSensitive: false);
+// "Karen" as speech-to-text may spell it (Karen, Caren, Karan, Karin, Keren...)
+final _wakeRe = RegExp(r'\b[kc](?:a|e|ae|ai)r+(?:e|a|i|y)n+\b', caseSensitive: false);
 const _sleepWords = {
-  'hey', 'hi', 'ok', 'okay', 'go', 'to', 'sleep', 'bye', 'goodbye', 'good', 'night', 'stop', 'thanks', 'thank',
+  'hey', 'hi', 'ok', 'okay', 'go', 'to', 'sleep', 'bye', 'by', 'goodbye', 'good', 'night', 'stop', 'thanks', 'thank',
   'you', 'that', 's', 'all', 'please', 'now', 'shut', 'down', 'standby', 'pause', 'the', 'a'
 };
 
 String _normalize(String t) => ' ${t.toLowerCase().replaceAll(RegExp(r'[^a-z\s]'), ' ').replaceAll(RegExp(r'\s+'), ' ')} ';
 bool hasWakeWord(String t) => _wakeRe.hasMatch(_normalize(t));
 
-/// "ANVI", "bye ANVI", "ANVI go to sleep" -> true;  "ANVI what's the time" -> false
+/// "Karen", "bye Karen", "Karen go to sleep" -> true;  "Karen what's the time" -> false
 bool isSleepCommand(String t) {
   final n = _normalize(t);
   if (!_wakeRe.hasMatch(n)) return false;
   return n.replaceAll(_wakeRe, ' ').trim().split(' ').where((w) => w.isNotEmpty && !_sleepWords.contains(w)).isEmpty;
 }
 
-/// "ANVI, what's the time?" -> "what's the time?"
+/// "Karen, what's the time?" -> "what's the time?"
 String afterWakeWord(String t) {
   final m = _wakeRe.firstMatch(t);
   if (m == null) return '';
@@ -56,13 +56,14 @@ class Assistant extends ChangeNotifier {
 
   OrbMode mode = OrbMode.sleep;
   bool awake = false;
-  bool passive = false; // asleep but listening for "ANVI"
+  bool passive = false; // asleep but listening for "Karen"
   bool paused = false; // app in background
   String you = '';
   String reply = '';
   String detail = '';
   String? error;
   List<CodeBlock> code = [];
+  final steps = <(String, String)>[]; // what Karen did this turn: (text, outcome)
   final _codeShown = StreamController<List<CodeBlock>>.broadcast();
   Stream<List<CodeBlock>> get onCode => _codeShown.stream;
 
@@ -79,7 +80,7 @@ class Assistant extends ChangeNotifier {
   String get status {
     if (error != null) return error!;
     return switch (mode) {
-      OrbMode.sleep => passive ? 'say “ANVI” to wake' : 'tap to wake',
+      OrbMode.sleep => passive ? 'say “Karen” to wake' : 'tap to wake',
       OrbMode.listening => 'listening...',
       OrbMode.thinking => detail.isNotEmpty ? '${detail.replaceAll(RegExp(r'\.+$'), '')}...' : 'thinking...',
       OrbMode.speaking => 'speaking...',
@@ -88,7 +89,7 @@ class Assistant extends ChangeNotifier {
 
   String get hint => switch (mode) {
         OrbMode.sleep => passive ? 'or tap the orb' : 'tap the orb',
-        OrbMode.listening => 'speak naturally · say “ANVI” to sleep',
+        OrbMode.listening => 'speak naturally · say “Karen” to sleep',
         OrbMode.thinking => 'tap to cancel',
         OrbMode.speaking => 'tap to interrupt',
       };
@@ -116,7 +117,7 @@ class Assistant extends ChangeNotifier {
     mic.asleep = true;
     mic.onUtterance = _onWakeCandidate;
     passive = await mic.start();
-    if (!passive) _showError('ANVI needs microphone permission');
+    if (!passive) _showError('Karen needs microphone permission');
     notifyListeners();
   }
 
@@ -188,7 +189,7 @@ class Assistant extends ChangeNotifier {
     mic.asleep = false;
     mic.onUtterance = _onUtterance;
     if (!await mic.start()) {
-      _showError('ANVI needs microphone permission');
+      _showError('Karen needs microphone permission');
       await goToSleep();
     }
   }
@@ -218,7 +219,7 @@ class Assistant extends ChangeNotifier {
   // --- a conversation turn ----------------------------------------------------
   final _clips = <Future<Uint8List?>>[];
   int _released = 0;
-  bool _release = false, _muted = false;
+  bool _release = false, _muted = false, _filled = false;
   Future<void> _pump = Future.value();
 
   void _queueSpeech(String sentence, [Future<Uint8List> Function(String)? synth]) {
@@ -249,10 +250,12 @@ class Assistant extends ChangeNotifier {
     you = text;
     reply = '';
     detail = '';
+    steps.clear();
     _clips.clear();
     _released = 0;
     _release = false;
     _muted = false;
+    _filled = false;
     _pump = Future.value();
     _setMode(OrbMode.thinking);
     await mic.stop();
@@ -304,13 +307,29 @@ class Assistant extends ChangeNotifier {
             notifyListeners();
           case ToolStarted(:final name, :final args):
             detail = toolStatus(name, args);
-            if ((name == 'web_search' || name == 'get_news') && _clips.isEmpty && buffer.trim().isEmpty) {
-              _queueSpeech(_fillers[Random().nextInt(_fillers.length)], _filler);
+            if (!_filled && _clips.isEmpty && buffer.trim().isEmpty) {
+              final filler = switch (name) {
+                'web_search' || 'get_news' => _fillers[Random().nextInt(_fillers.length)],
+                'speed_test' => 'Running a speed test, this takes about 15 seconds.',
+                'run_command' => 'On it.',
+                _ => null,
+              };
+              if (filler != null) {
+                _filled = true;
+                _queueSpeech(filler, _filler);
+              }
             }
             if (!_muted) {
               _release = true;
               _drain();
             }
+            notifyListeners();
+          case StepDone(:final text, :final outcome):
+            steps.add((text, outcome));
+            if (steps.length > 6) steps.removeAt(0);
+            notifyListeners();
+          case StatusUpdate(:final text):
+            detail = text;
             notifyListeners();
         }
       }

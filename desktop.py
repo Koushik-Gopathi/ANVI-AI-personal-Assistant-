@@ -1,6 +1,6 @@
-"""ANVI desktop app: its own window + tray icon, always listening for "ANVI".
+"""Karen desktop app: its own window + tray icon, always listening for "Karen".
 
-Run:    pythonw desktop.py            (or ANVI.exe after packaging)
+Run:    pythonw desktop.py            (or Karen.exe after packaging)
         desktop.py --background       start hidden in the tray (used for "Start with Windows")
 Build:  build_desktop.bat
 """
@@ -16,7 +16,7 @@ from pathlib import Path
 
 
 def _find_home() -> Path:
-    """Folder with .env: next to the script, or next to / above ANVI.exe."""
+    """Folder with .env: next to the script, or next to / above Karen.exe."""
     if not getattr(sys, "frozen", False):
         return Path(__file__).resolve().parent
     exe_dir = Path(sys.executable).resolve().parent
@@ -61,7 +61,7 @@ quitting = False
 # Microphone permission inside the window
 # ---------------------------------------------------------------------------
 def _allow_microphone() -> None:
-    """WebView2 would ask for mic access on every launch; allow it for ANVI's own page."""
+    """WebView2 would ask for mic access on every launch; allow it for Karen's own page."""
     from webview.platforms import edgechromium
 
     original_ready = edgechromium.EdgeChrome.on_webview_ready
@@ -102,7 +102,7 @@ def start_server() -> None:
         if _server_up():
             return
         time.sleep(0.1)
-    raise RuntimeError(f"ANVI's server didn't start on port {main.PORT}")
+    raise RuntimeError(f"Karen's server didn't start on port {main.PORT}")
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +112,8 @@ def show_window(*_):
     if window:
         window.show()
         window.restore()
+        window.on_top = True  # pop in front of other apps, then behave normally
+        window.on_top = False
 
 
 def toggle_listening(*_):
@@ -120,7 +122,7 @@ def toggle_listening(*_):
 
 
 def on_closing():
-    # the close button hides ANVI to the tray so it keeps listening for its name
+    # the close button hides Karen to the tray so it keeps listening for her name
     if quitting:
         return True
     window.hide()
@@ -143,12 +145,28 @@ def _launch_command() -> str:
     return f'"{pythonw if pythonw.exists() else sys.executable}" "{Path(__file__).resolve()}" --background'
 
 
+RUN_VALUE = "Karen"
+
+
+def _migrate_start_with_windows() -> None:
+    """The app used to be called ANVI: carry "Start with Windows" over to the new name."""
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
+            winreg.QueryValueEx(key, "ANVI")
+            winreg.DeleteValue(key, "ANVI")
+            winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ, _launch_command())
+    except OSError:
+        pass
+
+
 def starts_with_windows(_item=None) -> bool:
     import winreg
 
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
-            winreg.QueryValueEx(key, "ANVI")
+            winreg.QueryValueEx(key, RUN_VALUE)
             return True
     except OSError:
         return False
@@ -159,26 +177,26 @@ def toggle_start_with_windows(*_):
 
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
         if starts_with_windows():
-            winreg.DeleteValue(key, "ANVI")
+            winreg.DeleteValue(key, RUN_VALUE)
         else:
-            winreg.SetValueEx(key, "ANVI", 0, winreg.REG_SZ, _launch_command())
+            winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ, _launch_command())
 
 
 def run_tray() -> None:
     global tray
     icon_image = Image.open(main.WEB_DIR / "icon-192.png")
-    tray = pystray.Icon("ANVI", icon_image, "ANVI", menu=pystray.Menu(
-        pystray.MenuItem("Show ANVI", show_window, default=True),
+    tray = pystray.Icon("Karen", icon_image, "Karen", menu=pystray.Menu(
+        pystray.MenuItem("Show Karen", show_window, default=True),
         pystray.MenuItem(f"Wake / sleep  ({HOTKEY_TEXT})", toggle_listening),
         pystray.MenuItem("Start with Windows", toggle_start_with_windows, checked=starts_with_windows),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Quit ANVI", quit_app),
+        pystray.MenuItem("Quit Karen", quit_app),
     ))
     tray.run_detached()
 
 
 def listen_for_hotkey() -> None:
-    """Ctrl+Alt+A from any app: show ANVI and wake it up (or put it to sleep)."""
+    """Ctrl+Alt+A from any app: show Karen and wake her up (or put her to sleep)."""
     user32 = ctypes.windll.user32
     MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, WM_HOTKEY = 0x0001, 0x0002, 0x4000, 0x0312
     if not user32.RegisterHotKey(None, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, ord("A")):
@@ -193,22 +211,29 @@ def listen_for_hotkey() -> None:
 
 def _single_instance() -> bool:
     kernel32 = ctypes.windll.kernel32
-    kernel32.CreateMutexW(None, False, "Local\\ANVI-desktop-app")
+    kernel32.CreateMutexW(None, False, "Local\\Karen-desktop-app")
     return kernel32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
 
 
 def run() -> None:
     global window
     if not _single_instance():
-        ctypes.windll.user32.MessageBoxW(None, "ANVI is already running. Look for its icon in the system tray.",
-                                         "ANVI", 0x40)
+        # already running (maybe hidden in the tray): bring that window to the front instead
+        try:
+            request = urllib.request.Request(f"{APP_URL}/api/desktop/show", method="POST")
+            urllib.request.urlopen(request, timeout=3).close()
+        except OSError:
+            ctypes.windll.user32.MessageBoxW(None, "Karen is already running. Look for its icon in the system tray.",
+                                             "Karen", 0x40)
         return
 
+    _migrate_start_with_windows()
     start_server()
+    main.show_window_hook = show_window
     _allow_microphone()
     background = "--background" in sys.argv
     window = webview.create_window(
-        "ANVI", f"{APP_URL}/?app=desktop", width=1100, height=760, min_size=(420, 560),
+        "Karen", f"{APP_URL}/?app=desktop", width=1100, height=760, min_size=(420, 560),
         background_color="#080B14", hidden=background,
     )
     window.events.closing += on_closing

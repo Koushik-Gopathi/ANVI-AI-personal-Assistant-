@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>ANVI</title>
+  <title>Karen</title>
   <meta name="theme-color" content="#080b14" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
@@ -24,10 +24,11 @@
 
   <!-- stacked bottom column: items push each other up instead of overlapping -->
   <div class="dock" id="dock">
+    <ol class="steps" id="steps" hidden aria-label="What Karen did"></ol>
     <div class="reply" id="replyText"></div>
 
     <form class="composer" id="composer" autocomplete="off">
-      <input id="textInput" placeholder="type to ANVI…  (enter to send, esc to close)" />
+      <input id="textInput" placeholder="type to Karen…  (enter to send, esc to close)" />
     </form>
 
     <footer class="status-wrap">
@@ -51,7 +52,7 @@
   <div class="modal" id="phoneModal" hidden>
     <div class="modal-card" role="dialog" aria-labelledby="phoneTitle">
       <button class="modal-close" id="phoneClose" aria-label="Close">✕</button>
-      <h2 id="phoneTitle">ANVI on your phone</h2>
+      <h2 id="phoneTitle">Karen on your phone</h2>
       <div class="modal-tabs">
         <button data-mode="lan" class="active">Hotspot / same Wi-Fi</button>
         <button data-mode="public">Anywhere (Tailscale)</button>
@@ -61,7 +62,7 @@
       <div class="modal-body" data-panel="app" hidden>
         <div class="qr" id="qrApp"></div>
         <ol>
-          <li>Install the ANVI app on your Android phone.</li>
+          <li>Install the Karen app on your Android phone.</li>
           <li>Open it and tap <b>Scan setup code from PC</b>, then scan this code.</li>
           <li>Done. The app talks to Groq and Deepgram directly, so it works anywhere; PC actions reach this
             PC whenever it's on the same network (or Tailscale).</li>
@@ -75,8 +76,8 @@
           <li>Put the phone and this PC on the same network. <b>College Wi-Fi usually blocks this</b>, so turn on your
             phone's <b>hotspot</b> and connect this PC to it, then reopen this box.</li>
           <li>Scan the code with your phone camera.</li>
-          <li>You'll see a security warning because ANVI makes its own certificate: tap <b>Advanced → Proceed</b>.</li>
-          <li>In the browser menu tap <b>Add to Home screen</b> to open ANVI like an app.</li>
+          <li>You'll see a security warning because Karen makes its own certificate: tap <b>Advanced → Proceed</b>.</li>
+          <li>In the browser menu tap <b>Add to Home screen</b> to open Karen like an app.</li>
         </ol>
         <p class="modal-note">If the phone can't load it, Windows may be blocking Python: allow it on
           <b>private networks</b> when Windows asks.</p>
@@ -89,23 +90,23 @@
           <li>Install <b>Tailscale</b> on this PC and on your phone, and sign in with the same account on both.</li>
           <li>On this PC run <code>tailscale serve --bg 8000</code> in a terminal.</li>
           <li>Copy the <code>https://….ts.net</code> address it prints into <code>.env</code> as
-            <code>ANVI_PUBLIC_URL=</code> and restart ANVI. The QR code will appear here.</li>
+            <code>ANVI_PUBLIC_URL=</code> and restart Karen. The QR code will appear here.</li>
         </ol>
         <ol id="publicReady" hidden>
           <li>Make sure Tailscale is switched on on your phone.</li>
           <li>Scan the code. It works on any network, with no security warning.</li>
-          <li>Tap <b>Add to Home screen</b> to open ANVI like an app.</li>
+          <li>Tap <b>Add to Home screen</b> to open Karen like an app.</li>
         </ol>
         <code class="addr" id="addrPublic"></code>
       </div>
 
-      <p class="modal-note warn">Anyone who scans this code can talk to ANVI and control this PC. To unpair every
-        phone, delete <code>.anvi\pairing_secret</code> and restart ANVI.</p>
+      <p class="modal-note warn">Anyone who scans this code can talk to Karen and control this PC. To unpair every
+        phone, delete <code>.anvi\pairing_secret</code> and restart Karen.</p>
     </div>
   </div>
 
   <div class="corner-row">
-    <button class="corner" id="phoneBtn" title="Use ANVI on your phone" aria-label="Use ANVI on your phone" hidden>📱</button>
+    <button class="corner" id="phoneBtn" title="Use Karen on your phone" aria-label="Use Karen on your phone" hidden>📱</button>
     <button class="corner" id="codeBtn" title="Show code (C)" aria-label="Show code" hidden>&lt;/&gt;</button>
     <button class="corner" id="keyboardBtn" title="Type a message (T)" aria-label="Type a message">⌨</button>
   </div>

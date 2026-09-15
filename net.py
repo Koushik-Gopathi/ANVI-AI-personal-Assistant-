@@ -1,4 +1,4 @@
-"""Shared HTTP session for every outbound call ANVI makes."""
+"""Shared HTTP session for every outbound call Karen makes."""
 
 import ssl
 

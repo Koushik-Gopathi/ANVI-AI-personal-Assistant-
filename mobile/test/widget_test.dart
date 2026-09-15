@@ -3,12 +3,12 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('wake and sleep phrases', () {
-    expect(hasWakeWord('ANVI.'), isTrue);
-    expect(hasWakeWord('The Indus Valley civilization'), isFalse);
-    expect(hasWakeWord('I envy you so much'), isFalse);
-    expect(isSleepCommand('Bye, ANVI.'), isTrue);
-    expect(isSleepCommand('ANVI, what is the time?'), isFalse);
-    expect(afterWakeWord('ANVI, what is the time?'), 'what is the time?');
+    expect(hasWakeWord('Karen.'), isTrue);
+    expect(hasWakeWord('Hey, Karan'), isTrue);
+    expect(hasWakeWord('I am caring for my career'), isFalse);
+    expect(isSleepCommand('By Karen.'), isTrue);
+    expect(isSleepCommand('Karen, run a speed test'), isFalse);
+    expect(afterWakeWord('Hey, Karen. What is the time?'), 'What is the time?');
   });
 
   test('code blocks are split from spoken text', () {

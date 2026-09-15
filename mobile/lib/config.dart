@@ -9,7 +9,7 @@ class AnviConfig {
   String deepgramKey = '';
   String tavilyKey = '';
 
-  /// Pairing secret + addresses of ANVI on the PC, used for PC actions.
+  /// Pairing secret + addresses of Karen on the PC, used for PC actions.
   String pairToken = '';
   String lanUrl = '';
   String publicUrl = '';
@@ -40,7 +40,7 @@ class AnviConfig {
     }
   }
 
-  /// Returns false if [raw] isn't an ANVI setup code.
+  /// Returns false if [raw] isn't a Karen setup code.
   bool applySetupCode(String raw) {
     try {
       final data = jsonDecode(raw);

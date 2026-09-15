@@ -1,7 +1,7 @@
 {
-  "name": "ANVI",
-  "short_name": "ANVI",
-  "description": "Personal AI voice assistant",
+  "name": "Karen",
+  "short_name": "Karen",
+  "description": "Personal AI agent",
   "start_url": "/",
   "display": "standalone",
   "orientation": "portrait",

@@ -1,7 +1,7 @@
-"""Phone access for ANVI: HTTPS on the local network + QR-code pairing.
+"""Phone access for Karen: HTTPS on the local network + QR-code pairing.
 
 Phone browsers only allow the microphone on HTTPS pages, so a second server
-listens on the LAN with a self-signed certificate. ANVI can control this PC,
+listens on the LAN with a self-signed certificate. Karen can control this PC,
 so every request from another device must carry the pairing cookie, which a
 phone gets by scanning the QR code shown on the PC.
 """
@@ -60,7 +60,7 @@ def ensure_certificate(ip: str) -> tuple[str, str]:
     from cryptography.x509.oid import NameOID
 
     key = ec.generate_private_key(ec.SECP256R1())
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "ANVI")])
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Karen")])
     now = datetime.datetime.now(datetime.timezone.utc)
     cert = (
         x509.CertificateBuilder()

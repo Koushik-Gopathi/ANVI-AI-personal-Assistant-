@@ -1,4 +1,4 @@
-"""Web search and news for ANVI (no API keys needed).
+"""Web search and news for Karen (no API keys needed).
 
 web_search: Bing results + the most relevant lines from the top pages, so the
             model gets actual facts/numbers, not just headlines.

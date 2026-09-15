@@ -3,7 +3,9 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:http/http.dart' as http;
+import 'package:android_intent_plus/android_intent.dart';
 import 'package:http/io_client.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'config.dart';
 
@@ -30,53 +32,49 @@ Map<String, dynamic> _str(String d) => {'type': 'string', 'description': d};
 final phoneTools = [
   _tool(
       'web_search',
-      'Search the internet and read the top pages. Use for anything current or that you are not certain about: '
-          'prices and rates (gold, silver, petrol, stocks, crypto, currency), news, sports scores, events, releases, '
-          "people's current roles, 'today'/'latest' questions.",
-      {'query': _str("search query; add country/city and 'today' when relevant")},
+      'Search the internet and read the top pages. Use for anything current or uncertain: prices/rates, news, '
+          "sports, events, releases, people's current roles, how-to questions.",
+      {'query': _str("search query; add city/country and 'today' when relevant")},
       ['query']),
-  _tool('get_news', 'Latest news headlines, optionally about a topic.', {'topic': _str('topic, or empty for top stories')}),
-  _tool('get_weather', 'Real current weather and forecast.', {'location': _str("city; empty = user's location")}),
-];
-
-final pcTools = [
-  _tool('open_app', "Open an app on the user's PC.", {'name': _str('app name, e.g. chrome, whatsapp, notepad')}, ['name']),
-  _tool('close_app', 'Close a whole app on the PC when the user says close/quit it. To pause music use media_control.',
-      {'name': _str('app name')}, ['name']),
-  _tool('open_website', "Open a website or a Google search in the PC's browser.",
-      {'url_or_query': _str('URL/domain or search text')}, ['url_or_query']),
-  _tool('play_youtube', 'Play a song or video on YouTube on the PC.', {'query': _str('song or video')}, ['query']),
-  _tool('set_volume', 'Change the PC volume: give level (0-100) or action.', {
-    'level': {'type': 'integer', 'description': '0-100'},
-    'action': {'type': 'string', 'enum': ['up', 'down', 'mute']},
-  }),
-  _tool('media_control', 'Control music/video playback on the PC.', {
-    'action': {'type': 'string', 'enum': ['play_pause', 'next', 'previous', 'stop']},
-  }, ['action']),
-  _tool('take_screenshot', 'Save a screenshot of the PC screen. ONLY when the user explicitly asks for a screenshot.'),
-  _tool('system_info', 'PC battery, CPU, RAM and disk status.'),
-  _tool('find_files', 'Find files/folders on the PC by name.', {'name': _str('words in the file name')}, ['name']),
-  _tool('open_path', 'Open a file or folder on the PC by full path.', {'path': _str('full path')}, ['path']),
-  _tool('lock_pc', 'Lock the PC. Only when the user explicitly asks.'),
-  _tool('power_action', 'Shut down, restart or sleep the PC, or cancel a pending shutdown.', {
-    'action': {'type': 'string', 'enum': ['shutdown', 'restart', 'sleep', 'cancel']},
-  }, ['action']),
+  _tool('get_news', 'Latest news headlines, optionally on a topic.', {'topic': _str('topic, or empty for top stories')}),
+  _tool('get_weather', 'Real weather and forecast.', {'location': _str("city; empty = user's location")}),
+  _tool('speed_test', "Measure this phone's internet download/upload speed and ping (takes ~15 s)."),
+  _tool('open_link', 'Open a website, app link or search on the phone.', {'url': _str('URL, or text to search Google')},
+      ['url']),
+  _tool('call_number', "Open the phone's dialer with a number ready to call.", {'number': _str('phone number')},
+      ['number']),
+  _tool('send_sms', 'Open an SMS to a number with the message filled in; the user taps send.',
+      {'number': _str('phone number'), 'message': _str('text')}, ['number', 'message']),
+  _tool('whatsapp_message', 'Open a WhatsApp chat with the message filled in; the user taps send.',
+      {'number': _str('number with country code, e.g. 919876543210'), 'message': _str('text')}, ['number', 'message']),
+  _tool('set_alarm', 'Set an alarm on the phone.', {
+    'hour': {'type': 'integer', 'description': '0-23'},
+    'minute': {'type': 'integer', 'description': '0-59'},
+    'label': _str('alarm label'),
+  }, ['hour', 'minute']),
+  _tool('set_timer', 'Start a countdown timer on the phone.',
+      {'seconds': {'type': 'integer', 'description': 'length in seconds'}, 'label': _str('timer label')}, ['seconds']),
+  _tool('navigate_to', 'Open Google Maps directions to a place.', {'place': _str('destination')}, ['place']),
 ];
 
 String toolStatus(String name, Map args) => switch (name) {
       'web_search' => 'searching: ${args['query'] ?? ''}',
       'get_news' => 'checking the news',
       'get_weather' => 'checking the weather',
+      'speed_test' => 'running a speed test',
+      'open_link' => 'opening link',
+      'call_number' => 'opening dialer',
+      'send_sms' || 'whatsapp_message' => 'preparing message',
+      'set_alarm' => 'setting alarm',
+      'set_timer' => 'starting timer',
+      'navigate_to' => 'opening maps',
+      'run_command' => 'running a command on your PC',
       'open_app' => 'opening ${args['name'] ?? 'app'} on your PC',
-      'close_app' => 'closing ${args['name'] ?? 'app'} on your PC',
-      'play_youtube' => 'playing on your PC',
-      'system_info' => 'checking your PC',
-      'take_screenshot' => 'taking a screenshot',
-      _ => 'working on it',
+      _ => '${name.replaceAll('_', ' ')} on your PC',
     };
 
 // ---------------------------------------------------------------------------
-// Runs tools: web/news/weather on the phone, PC actions through ANVI on the PC
+// Runs tools: web/news/weather on the phone, PC actions through Karen on the PC
 // ---------------------------------------------------------------------------
 class Tools {
   final AnviConfig cfg;
@@ -84,22 +82,85 @@ class Tools {
   late final PcBridge pc = PcBridge(cfg);
   Tools(this.cfg, this.client);
 
-  Future<Map<String, dynamic>> run(String name, Map<String, dynamic> args, String userText, int turn) async {
+  Future<Map<String, dynamic>> run(String name, Map<String, dynamic> args, String userText, int turn,
+      String lastReply) async {
     args.removeWhere((_, v) => v == null || v == '');
+    String arg(String k) => '${args[k] ?? ''}';
+    int number(String k) => (args[k] is num) ? (args[k] as num).round() : int.tryParse(arg(k)) ?? 0;
     try {
       switch (name) {
         case 'web_search':
-          return await webSearch('${args['query'] ?? ''}');
+          return await webSearch(arg('query'));
         case 'get_news':
-          return await getNews('${args['topic'] ?? ''}');
+          return await getNews(arg('topic'));
         case 'get_weather':
-          return await getWeather('${args['location'] ?? ''}');
+          return await getWeather(arg('location'));
+        case 'speed_test':
+          return await speedTest();
+        case 'open_link':
+          return await PhoneActions.openLink(arg('url'));
+        case 'call_number':
+          return await PhoneActions.dial(arg('number'));
+        case 'send_sms':
+          return await PhoneActions.sms(arg('number'), arg('message'));
+        case 'whatsapp_message':
+          return await PhoneActions.whatsapp(arg('number'), arg('message'));
+        case 'set_alarm':
+          return await PhoneActions.alarm(number('hour'), number('minute'), arg('label'));
+        case 'set_timer':
+          return await PhoneActions.timer(number('seconds'), arg('label'));
+        case 'navigate_to':
+          return await PhoneActions.navigate(arg('place'));
         default:
-          return await pc.call(name, args, userText, turn);
+          return await pc.call(name, args, userText, turn, lastReply);
       }
     } catch (e) {
       return {'error': '$e'};
     }
+  }
+
+  // --- speed test (Cloudflare) ----------------------------------------------------
+  Future<Map<String, dynamic>> speedTest() async {
+    const base = 'https://speed.cloudflare.com';
+    const headers = {'Referer': '$base/'};
+    final pings = <double>[];
+    for (var i = 0; i < 6; i++) {
+      final sw = Stopwatch()..start();
+      final r = await client.get(Uri.parse('$base/__down?bytes=0'), headers: headers).timeout(const Duration(seconds: 8));
+      if (r.statusCode != 200) return {'error': 'speed test server refused (${r.statusCode})'};
+      if (i > 0) pings.add(sw.elapsedMicroseconds / 1000);
+    }
+    pings.sort();
+
+    // Cloudflare refuses single downloads of 100 MB or more: fetch 25 MB pieces for ~8 s
+    var received = 0;
+    final down = Stopwatch()..start();
+    while (down.elapsedMilliseconds < 8000) {
+      final req = http.Request('GET', Uri.parse('$base/__down?bytes=25000000'))..headers.addAll(headers);
+      final res = await client.send(req).timeout(const Duration(seconds: 15));
+      if (res.statusCode != 200) return {'error': 'download test failed (${res.statusCode})'};
+      await for (final chunk in res.stream) {
+        received += chunk.length;
+        if (down.elapsedMilliseconds > 8000) break;
+      }
+    }
+    final downloadMbps = received * 8 / (down.elapsedMicroseconds / 1e6) / 1e6;
+
+    final blob = List<int>.generate(500000, (i) => (i * 131) & 0xff);
+    var sent = 0;
+    final up = Stopwatch()..start();
+    while (up.elapsedMilliseconds < 6000) {
+      final r = await client.post(Uri.parse('$base/__up'), headers: headers, body: blob).timeout(const Duration(seconds: 30));
+      if (r.statusCode != 200) break;
+      sent += blob.length;
+    }
+    final uploadMbps = sent * 8 / (up.elapsedMicroseconds / 1e6) / 1e6;
+    return {
+      'download_mbps': double.parse(downloadMbps.toStringAsFixed(1)),
+      'upload_mbps': double.parse(uploadMbps.toStringAsFixed(1)),
+      'ping_ms': pings[pings.length ~/ 2].round(),
+      'measured_from': 'this phone',
+    };
   }
 
   // --- web search -----------------------------------------------------------
@@ -372,7 +433,7 @@ class Tools {
 }
 
 // ---------------------------------------------------------------------------
-// PC bridge: asks ANVI on the PC to perform an action
+// PC bridge: asks Karen on the PC to perform an action
 // ---------------------------------------------------------------------------
 class PcBridge {
   final AnviConfig cfg;
@@ -388,18 +449,49 @@ class PcBridge {
     _client = IOClient(io);
   }
 
-  Future<Map<String, dynamic>> call(String name, Map<String, dynamic> args, String userText, int turn) async {
-    if (!cfg.hasPc) return {'error': "PC control isn't set up. Scan the setup code from ANVI on the PC."};
-    final candidates = [?_working, cfg.publicUrl, cfg.lanUrl]
-        .where((u) => u.isNotEmpty)
-        .toSet();
-    for (final base in candidates) {
+  /// PC tools Karen can use right now (empty when the PC can't be reached).
+  List<Map<String, dynamic>> toolDefs = [];
+  DateTime _fetchedAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  Iterable<String> get _candidates => [?_working, cfg.publicUrl, cfg.lanUrl].where((u) => u.isNotEmpty).toSet();
+
+  Future<void> refreshToolDefs({bool force = false}) async {
+    if (!cfg.hasPc) return;
+    final age = DateTime.now().difference(_fetchedAt);
+    if (!force && age < (toolDefs.isEmpty ? const Duration(seconds: 20) : const Duration(minutes: 3))) return;
+    _fetchedAt = DateTime.now();
+    for (final base in _candidates) {
+      try {
+        final r = await _client
+            .get(Uri.parse('$base/api/tool-defs'), headers: {'Cookie': 'anvi_pair=${cfg.pairToken}'})
+            .timeout(const Duration(seconds: 3));
+        if (r.statusCode != 200) continue;
+        toolDefs = List<Map<String, dynamic>>.from(jsonDecode(utf8.decode(r.bodyBytes))['tools']);
+        _working = base;
+        return;
+      } catch (_) {
+        continue;
+      }
+    }
+    toolDefs = [];
+  }
+
+  Future<Map<String, dynamic>> call(String name, Map<String, dynamic> args, String userText, int turn,
+      String lastReply) async {
+    if (!cfg.hasPc) return {'error': "PC control isn't set up. Scan the setup code from Karen on the PC."};
+    for (final base in _candidates) {
       try {
         final r = await _client
             .post(Uri.parse('$base/api/tool'),
                 headers: {'Content-Type': 'application/json', 'Cookie': 'anvi_pair=${cfg.pairToken}'},
-                body: jsonEncode({'name': name, 'args': args, 'user_text': userText, 'turn': turn}))
-            .timeout(const Duration(seconds: 20));
+                body: jsonEncode({
+                  'name': name,
+                  'args': args,
+                  'user_text': userText,
+                  'turn': turn,
+                  'last_reply': lastReply,
+                }))
+            .timeout(const Duration(seconds: 120)); // commands and file work can take a while
         if (r.statusCode == 401) return {'error': 'the PC no longer recognises this phone; scan the setup code again'};
         final data = jsonDecode(utf8.decode(r.bodyBytes));
         _working = base;
@@ -409,8 +501,68 @@ class PcBridge {
       }
     }
     return {
-      'error': "Can't reach the PC. Make sure ANVI is running on it and the phone is on the same network "
+      'error': "Can't reach the PC. Make sure Karen is running on it and the phone is on the same network "
           '(or Tailscale).'
     };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Phone actions: dialer, SMS, WhatsApp, alarms, timers, maps, links
+// ---------------------------------------------------------------------------
+class PhoneActions {
+  static String _digits(String n) => n.replaceAll(RegExp(r'[^\d+]'), '');
+
+  static Future<Map<String, dynamic>> _open(Uri uri, String what) async {
+    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    return ok ? {'opened': what} : {'error': 'no app on this phone can open $what'};
+  }
+
+  static Future<Map<String, dynamic>> openLink(String url) {
+    final looksLikeUrl = RegExp(r'^[\w+.-]+://|^[\w-]+(\.[\w-]+)+(/\S*)?$').hasMatch(url.trim());
+    final uri = looksLikeUrl
+        ? Uri.parse(url.contains('://') ? url.trim() : 'https://${url.trim()}')
+        : Uri.https('www.google.com', '/search', {'q': url});
+    return _open(uri, uri.toString());
+  }
+
+  static Future<Map<String, dynamic>> dial(String number) async {
+    final r = await _open(Uri(scheme: 'tel', path: _digits(number)), 'the dialer');
+    return r.containsKey('error') ? r : {...r, 'note': 'the number is ready; the user taps call'};
+  }
+
+  static Future<Map<String, dynamic>> sms(String number, String message) async {
+    final r = await _open(Uri(scheme: 'sms', path: _digits(number), queryParameters: {'body': message}), 'messages');
+    return r.containsKey('error') ? r : {...r, 'note': 'message is typed in; the user taps send'};
+  }
+
+  static Future<Map<String, dynamic>> whatsapp(String number, String message) async {
+    final digits = _digits(number).replaceAll('+', '');
+    final r = await _open(Uri.https('wa.me', '/$digits', {'text': message}), 'WhatsApp');
+    return r.containsKey('error') ? r : {...r, 'note': 'message is typed in; the user taps send'};
+  }
+
+  static Future<Map<String, dynamic>> alarm(int hour, int minute, String label) async {
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return {'error': 'invalid time'};
+    await AndroidIntent(action: 'android.intent.action.SET_ALARM', arguments: {
+      'android.intent.extra.alarm.HOUR': hour,
+      'android.intent.extra.alarm.MINUTES': minute,
+      if (label.isNotEmpty) 'android.intent.extra.alarm.MESSAGE': label,
+      'android.intent.extra.alarm.SKIP_UI': true,
+    }).launch();
+    return {'alarm_set': '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}', 'label': label};
+  }
+
+  static Future<Map<String, dynamic>> timer(int seconds, String label) async {
+    if (seconds <= 0) return {'error': 'invalid length'};
+    await AndroidIntent(action: 'android.intent.action.SET_TIMER', arguments: {
+      'android.intent.extra.alarm.LENGTH': seconds,
+      if (label.isNotEmpty) 'android.intent.extra.alarm.MESSAGE': label,
+      'android.intent.extra.alarm.SKIP_UI': true,
+    }).launch();
+    return {'timer_started_seconds': seconds, 'label': label};
+  }
+
+  static Future<Map<String, dynamic>> navigate(String place) =>
+      _open(Uri.https('www.google.com', '/maps/dir/', {'api': '1', 'destination': place}), 'Google Maps');
 }

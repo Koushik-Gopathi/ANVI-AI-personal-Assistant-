@@ -1,4 +1,4 @@
-"""PC control tools for ANVI (Windows)."""
+"""PC control tools for Karen (Windows)."""
 
 import ctypes
 import difflib
@@ -44,7 +44,7 @@ PROCESS_ALIASES = {
     "paint": "mspaint.exe", "task manager": "Taskmgr.exe", "teams": "ms-teams.exe", "zoom": "Zoom.exe",
 }
 PROTECTED_PROCESSES = {"explorer.exe", "csrss.exe", "winlogon.exe", "lsass.exe", "svchost.exe", "services.exe",
-                       "system", "smss.exe", "wininit.exe", "dwm.exe", "python.exe", "pythonw.exe"}
+                       "system", "smss.exe", "wininit.exe", "dwm.exe", "python.exe", "pythonw.exe", "karen.exe"}
 
 SKIP_DIRS = {"node_modules", ".git", "venv", ".venv", "__pycache__", "appdata", "site-packages", "$recycle.bin"}
 
@@ -120,7 +120,7 @@ def close_app(name: str) -> dict:
     n = _clean_name(name)
     image = PROCESS_ALIASES.get(n) or (n if n.endswith(".exe") else f"{n.replace(' ', '')}.exe")
     if image.lower() in PROTECTED_PROCESSES:
-        return {"error": f"I won't close {image}, Windows or ANVI need it."}
+        return {"error": f"I won't close {image}, Windows or Karen need it."}
     running = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True,
                              creationflags=NO_WINDOW).stdout
     names = {line.split('","')[0].strip('"') for line in running.splitlines() if line}
@@ -200,7 +200,7 @@ def media_control(action: str) -> dict:
 def take_screenshot() -> dict:
     from PIL import ImageGrab
 
-    folder = HOME / "Pictures" / "ANVI Screenshots"
+    folder = HOME / "Pictures" / "Karen Screenshots"
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"screenshot_{datetime.now():%Y%m%d_%H%M%S}.png"
     ImageGrab.grab(all_screens=True).save(path)

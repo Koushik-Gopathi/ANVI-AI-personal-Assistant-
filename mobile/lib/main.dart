@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import 'assistant.dart';
 import 'config.dart';
@@ -34,7 +35,7 @@ class _AnviAppState extends State<AnviApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'ANVI',
+      title: 'Karen',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -48,6 +49,44 @@ class _AnviAppState extends State<AnviApp> {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Permissions: Android only grants mic/camera after asking the user at runtime
+// ---------------------------------------------------------------------------
+Future<bool> ensurePermission(BuildContext context, Permission permission, String why) async {
+  var status = await permission.status;
+  if (status.isGranted) return true;
+  if (!status.isPermanentlyDenied) {
+    status = await permission.request();
+    if (status.isGranted) return true;
+  }
+  if (!context.mounted) return false;
+  final openSettings = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: const Color(0xFF0B111D),
+      title: const Text('Permission needed'),
+      content: Text(status.isPermanentlyDenied
+          ? '$why\n\nAndroid is blocking it for Karen. Open Settings → Permissions and allow it.'
+          : why),
+      actions: [
+        TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Not now')),
+        FilledButton(
+          onPressed: () => Navigator.of(ctx).pop(true),
+          child: Text(status.isPermanentlyDenied ? 'Open settings' : 'Allow'),
+        ),
+      ],
+    ),
+  );
+  if (openSettings != true) return false;
+  if (status.isPermanentlyDenied) {
+    await openAppSettings();
+    return false; // checked again when the user comes back to the app
+  }
+  return (await permission.request()).isGranted;
+}
+
+const micWhy = 'Karen needs the microphone to hear you say “Karen” and your requests.';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -67,6 +106,10 @@ class _SetupScreenState extends State<SetupScreen> {
   bool _manual = false;
 
   Future<void> _scan() async {
+    if (!await ensurePermission(context, Permission.camera, 'Karen needs the camera to scan the code on your PC.')) {
+      return;
+    }
+    if (!mounted) return;
     final raw = await Navigator.of(context).push<String>(MaterialPageRoute(builder: (_) => const ScanScreen()));
     if (raw == null || !mounted) return;
     if (widget.cfg.applySetupCode(raw)) {
@@ -75,7 +118,7 @@ class _SetupScreenState extends State<SetupScreen> {
       Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => HomeScreen(cfg: widget.cfg)));
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("That isn't an ANVI setup code. On the PC open 📱 → Android app.")));
+          const SnackBar(content: Text("That isn't a Karen setup code. On the PC open 📱 → Android app.")));
     }
   }
 
@@ -96,12 +139,12 @@ class _SetupScreenState extends State<SetupScreen> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(28, 60, 28, 28),
           children: [
-            const Text('ANVI', style: TextStyle(color: cyan, letterSpacing: 8, fontSize: 14)),
+            const Text('Karen', style: TextStyle(color: cyan, letterSpacing: 8, fontSize: 14)),
             const SizedBox(height: 18),
             const Text('Set up your assistant', style: TextStyle(fontSize: 26, fontWeight: FontWeight.w300)),
             const SizedBox(height: 14),
             const Text(
-              'On your laptop, open ANVI and tap the 📱 button, choose the "Android app" tab, then scan the code. '
+              'On your laptop, open Karen and tap the 📱 button, choose the "Android app" tab, then scan the code. '
               'That brings over your API keys and lets this phone control your PC.',
               style: TextStyle(color: Color(0xFFB8C7D3), height: 1.5),
             ),
@@ -123,7 +166,7 @@ class _SetupScreenState extends State<SetupScreen> {
               const SizedBox(height: 18),
               OutlinedButton(onPressed: _saveManual, child: const Text('Save')),
               const SizedBox(height: 8),
-              const Text('Without the setup code ANVI works, but cannot control your PC.',
+              const Text('Without the setup code Karen works, but cannot control your PC.',
                   style: TextStyle(color: muted, fontSize: 12)),
             ],
           ],
@@ -179,14 +222,43 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     anvi.addListener(() => setState(() {}));
     anvi.onCode.listen((_) => _showCode());
-    anvi.startPassive();
+    anvi.tools.pc.refreshToolDefs(force: true);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _startListening());
+  }
+
+  bool _micAllowed = false;
+
+  Future<void> _startListening() async {
+    _micAllowed = await ensurePermission(context, Permission.microphone, micWhy);
+    if (!mounted) return;
+    setState(() {});
+    if (_micAllowed) await anvi.startPassive();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Android doesn't allow the mic in the background, so listen only while ANVI is on screen
+    // Android doesn't allow the mic in the background, so listen only while Karen is on screen
     if (state == AppLifecycleState.paused) anvi.pause();
-    if (state == AppLifecycleState.resumed && anvi.paused) anvi.resume();
+    if (state == AppLifecycleState.resumed) {
+      if (!_micAllowed) {
+        // maybe the user just allowed it in Settings
+        Permission.microphone.status.then((s) {
+          if (s.isGranted && mounted) {
+            _micAllowed = true;
+            setState(() {});
+            anvi.resume();
+          }
+        });
+      } else if (anvi.paused) {
+        anvi.resume();
+      }
+      anvi.tools.pc.refreshToolDefs();
+    }
+  }
+
+  Future<void> _onOrbTap() async {
+    if (!_micAllowed) return _startListening();
+    await anvi.tap();
   }
 
   @override
@@ -210,7 +282,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           textInputAction: TextInputAction.send,
           onSubmitted: (v) => Navigator.of(ctx).pop(v),
           decoration: InputDecoration(
-            hintText: 'Type to ANVI…',
+            hintText: 'Type to Karen…',
             border: OutlineInputBorder(borderRadius: BorderRadius.circular(30)),
             suffixIcon: IconButton(icon: const Icon(Icons.send), onPressed: () => Navigator.of(ctx).pop(controller.text)),
           ),
@@ -273,8 +345,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           ListTile(
             leading: Icon(cfg.hasPc ? Icons.computer : Icons.desktop_access_disabled, color: cyan),
-            title: Text(cfg.hasPc ? 'PC control is set up' : 'PC control not set up'),
-            subtitle: Text(cfg.hasPc ? [cfg.publicUrl, cfg.lanUrl].where((u) => u.isNotEmpty).join('\n') : 'Scan the setup code from ANVI on your PC'),
+            title: Text(!cfg.hasPc
+                ? 'PC control not set up'
+                : anvi.tools.pc.toolDefs.isNotEmpty
+                    ? 'Connected to your PC'
+                    : "PC set up, but can't reach it right now"),
+            subtitle: Text(cfg.hasPc ? [cfg.publicUrl, cfg.lanUrl].where((u) => u.isNotEmpty).join('\n') : 'Scan the setup code from Karen on your PC'),
           ),
           ListTile(
             leading: const Icon(Icons.qr_code_scanner),
@@ -282,6 +358,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             onTap: () {
               Navigator.of(ctx).pop();
               Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => SetupScreen(cfg: cfg, onDone: () {})));
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.mic_none),
+            title: const Text('Microphone permission'),
+            subtitle: Text(_micAllowed ? 'Allowed' : 'Not allowed — tap to fix'),
+            onTap: () {
+              Navigator.of(ctx).pop();
+              _micAllowed ? openAppSettings() : _startListening();
             },
           ),
           ListTile(
@@ -305,7 +390,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         Positioned.fill(
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTap: anvi.tap,
+            onTap: _onOrbTap,
             child: Orb(mode: () => anvi.mode, level: () => anvi.level),
           ),
         ),
@@ -329,6 +414,31 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               ]),
             ),
             const Spacer(),
+            if (anvi.steps.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(28, 0, 28, 10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (final (text, outcome) in anvi.steps)
+                      Text(
+                        '${outcome == 'done' ? '✓' : outcome == 'waiting for your OK' ? '?' : '✕'}  '
+                        '${outcome == 'done' ? text : '$text — $outcome'}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 11.5,
+                          color: outcome == 'done'
+                              ? const Color(0xFF7F93A3)
+                              : outcome == 'waiting for your OK'
+                                  ? const Color(0xFFE7C26B)
+                                  : const Color(0xFFFF7A8A),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
             if (anvi.reply.isNotEmpty)
               ConstrainedBox(
                 constraints: BoxConstraints(maxHeight: height * 0.26),
@@ -340,7 +450,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 ),
               ),
             const SizedBox(height: 18),
-            Text(anvi.status,
+            Text(_micAllowed ? anvi.status : 'microphone not allowed',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontFamily: 'monospace',
@@ -349,7 +459,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   color: anvi.error != null ? const Color(0xFFFF7A8A) : (anvi.mode == OrbMode.sleep ? muted : cyan),
                 )),
             const SizedBox(height: 6),
-            Text(anvi.hint.toUpperCase(), style: const TextStyle(fontSize: 9, letterSpacing: 2.5, color: Color(0xFF4A5663))),
+            Text((_micAllowed ? anvi.hint : 'tap the orb to allow').toUpperCase(), style: const TextStyle(fontSize: 9, letterSpacing: 2.5, color: Color(0xFF4A5663))),
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
               child: Row(children: [

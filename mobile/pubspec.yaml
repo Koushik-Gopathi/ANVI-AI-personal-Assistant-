@@ -40,6 +40,9 @@ dependencies:
   shared_preferences: ^2.5.5
   mobile_scanner: ^7.4.2
   wakelock_plus: ^1.7.0
+  permission_handler: 12.0.1
+  url_launcher: ^6.3.2
+  android_intent_plus: ^6.1.0
 
 dev_dependencies:
   flutter_test:

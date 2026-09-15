@@ -30,7 +30,7 @@ class Deepgram {
       'language': cfg.sttLanguage,
       'smart_format': 'true',
       'punctuate': 'true',
-      if (cfg.sttModel.startsWith('nova-3')) 'keyterm': 'ANVI',
+      if (cfg.sttModel.startsWith('nova-3')) 'keyterm': 'Karen',
     };
     final r = await client
         .post(Uri.https('api.deepgram.com', '/v1/listen', params),
@@ -73,7 +73,7 @@ class MicListener {
   final _recorder = AudioRecorder();
   StreamSubscription<Uint8List>? _sub;
 
-  /// Asleep: only short phrases matter ("ANVI ..."), so takes are cut short.
+  /// Asleep: only short phrases matter ("Karen ..."), so takes are cut short.
   bool asleep = false;
   void Function(Uint8List wav)? onUtterance;
   double level = 0;

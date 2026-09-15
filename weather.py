@@ -1,4 +1,4 @@
-"""Weather for ANVI via Open-Meteo (free, no API key)."""
+"""Weather for Karen via Open-Meteo (free, no API key)."""
 
 import os
 

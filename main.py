@@ -34,9 +34,11 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 import agent  # noqa: E402
+import docs  # noqa: E402
 import pc  # noqa: E402
 import phone  # noqa: E402
 import search  # noqa: E402
+import store  # noqa: E402
 import weather  # noqa: E402
 from net import http  # noqa: E402
 
@@ -55,6 +57,7 @@ STT_MODEL = os.getenv("DEEPGRAM_STT_MODEL", "nova-3")
 STT_LANGUAGE = os.getenv("DEEPGRAM_STT_LANGUAGE", "en-IN")  # Indian English: far fewer mis-hearings
 TTS_VOICE = os.getenv("DEEPGRAM_TTS_VOICE", "aura-asteria-en")
 PORT = int(os.getenv("APP_PORT", "8000"))
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "").strip()  # Telugu/Hindi voice
 PHONE_ENABLED = os.getenv("ANVI_PHONE", "1") == "1"
 PHONE_PORT = int(os.getenv("ANVI_PHONE_PORT", "8443"))
 # public HTTPS address that forwards to this PC, e.g. https://my-laptop.tail1234.ts.net (Tailscale)
@@ -64,25 +67,37 @@ PUBLIC_URL = os.getenv("ANVI_PUBLIC_URL", "").strip().rstrip("/")
 # ---------------------------------------------------------------------------
 # Speech
 # ---------------------------------------------------------------------------
-def transcribe(audio_bytes: bytes, mime_type: str) -> str:
+def transcribe(audio_bytes: bytes, mime_type: str, purpose: str = "") -> str:
+    """Deepgram for English and for spotting the wake word; Groq Whisper for Telugu/Hindi/any language."""
+    settings = store.settings()
+    language = store.LANGUAGES[settings["language"]]
+    content_type = mime_type.split(";")[0].strip() or "audio/webm"  # "audio/webm;codecs=opus" -> "audio/webm"
+
+    if purpose != "wake" and settings["language"] != "english":
+        ext = {"audio/webm": "webm", "audio/ogg": "ogg", "audio/mp4": "m4a", "audio/wav": "wav",
+               "audio/mpeg": "mp3"}.get(content_type, "webm")
+        form = {"model": "whisper-large-v3", "response_format": "json", "prompt": settings["wake_word"]}
+        if language["code"]:
+            form["language"] = language["code"]
+        r = http.post("https://api.groq.com/openai/v1/audio/transcriptions",
+                      headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                      files={"file": (f"speech.{ext}", audio_bytes, content_type)}, data=form, timeout=60)
+        r.raise_for_status()
+        return (r.json().get("text") or "").strip()
+
     if not DEEPGRAM_API_KEY:
         raise RuntimeError("DEEPGRAM_API_KEY missing in .env")
-
     params = {"model": STT_MODEL, "smart_format": "true", "punctuate": "true", "language": STT_LANGUAGE}
     # help it spell the wake/sleep word
     if STT_MODEL.startswith("nova-3"):
-        params["keyterm"] = "Karen"
+        params["keyterm"] = settings["wake_word"]
     else:
-        params["keywords"] = "Karen:2"
+        params["keywords"] = f"{settings['wake_word']}:2"
 
     response = http.post(
         "https://api.deepgram.com/v1/listen",
         params=params,
-        headers={
-            "Authorization": f"Token {DEEPGRAM_API_KEY}",
-            # "audio/webm;codecs=opus" -> "audio/webm"
-            "Content-Type": mime_type.split(";")[0].strip() or "audio/webm",
-        },
+        headers={"Authorization": f"Token {DEEPGRAM_API_KEY}", "Content-Type": content_type},
         data=audio_bytes,
         timeout=60,
     )
@@ -96,6 +111,14 @@ def transcribe(audio_bytes: bytes, mime_type: str) -> str:
     ).strip()
 
 
+INDIC_SCRIPTS = [(re.compile(r"[\u0C00-\u0C7F]"), "te-IN"), (re.compile(r"[\u0900-\u097F]"), "hi-IN")]
+
+
+def indic_language(text: str) -> str:
+    """BCP-47 code if the text is written in Telugu or Hindi script, else ''."""
+    return next((code for rx, code in INDIC_SCRIPTS if rx.search(text)), "")
+
+
 def clean_for_speech(text: str) -> str:
     text = text.replace(" ", " ").replace(" ", " ")
     text = re.sub(r"\*\*|__|`|#+\s?", "", text)
@@ -106,14 +129,27 @@ def clean_for_speech(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def synthesize(text: str) -> str:
-    """Return base64-encoded MP3 for `text` (nothing is written to disk)."""
+def synthesize(text: str):
+    """Base64 MP3 for `text` (nothing is written to disk).
+
+    Telugu/Hindi text goes to Sarvam AI when SARVAM_API_KEY is set; without it a
+    {"say", "lang"} dict is returned so the device speaks it with its own voice.
+    """
+    lang = indic_language(text)
+    if lang:
+        if not SARVAM_API_KEY:
+            return {"say": clean_for_speech(text), "lang": lang}
+        r = http.post("https://api.sarvam.ai/text-to-speech", headers={"api-subscription-key": SARVAM_API_KEY},
+                      json={"text": clean_for_speech(text)[:2400], "language_code": lang, "model": "bulbul:v3",
+                            "speaker": "priya", "output_audio_codec": "mp3"}, timeout=30)
+        r.raise_for_status()
+        return r.json()["audios"][0]
     if not DEEPGRAM_API_KEY:
         raise RuntimeError("DEEPGRAM_API_KEY missing in .env")
 
     response = http.post(
         "https://api.deepgram.com/v1/speak",
-        params={"model": TTS_VOICE},
+        params={"model": store.settings()["voice"]},
         headers={"Authorization": f"Token {DEEPGRAM_API_KEY}", "Content-Type": "application/json"},
         json={"text": clean_for_speech(text)[:1900]},
         timeout=30,
@@ -172,11 +208,25 @@ TOOLS = [
     _tool("find_files", "Find files/folders by name in the user's Desktop, Documents, Downloads, Pictures, Music, "
           "Videos.", {"name": _str("words in the name")}, ("name",)),
     _tool("open_path", "Open a file or folder with its default app.", {"path": PATH}, ("path",)),
-    _tool("open_app", "Open an app.", {"name": _str("app name, e.g. chrome, whatsapp, notepad, settings")}, ("name",)),
-    _tool("close_app", "Close an app when the user says close/quit it.", {"name": _str("app name")}, ("name",)),
-    _tool("open_website", "Open a website or a Google search in the browser.",
-          {"url_or_query": _str("URL/domain or search text")}, ("url_or_query",)),
-    _tool("play_youtube", "Play a song or video on YouTube.", {"query": _str("song or video")}, ("query",)),
+    _tool("read_document", "Read the text of a Word (.docx), PDF, PowerPoint (.pptx) or text file, e.g. to "
+          "summarise it or answer questions. Long files come in parts: call again with next_start.",
+          {"path": PATH, "start": _num("character offset from a previous call's next_start")}, ("path",)),
+    _tool("create_document", "Create a real Word (.docx) or PDF document. Write content in simple markdown: "
+          "# heading, ## subheading, - bullet, 1. numbered, **bold**, blank line between paragraphs.",
+          {"path": _str("file path ending in .docx or .pdf"), "title": _str("document title"),
+           "content": _str("the document body")}, ("path", "content")),
+    _tool("organize_folder", "Tidy a folder by moving its loose files into Documents/Images/Videos/Audio/Archives/"
+          "Installers/Code/Others subfolders (asks first).", {"path": PATH}),
+    _tool("open_app", "Open an app on the PC.", {"name": _str("app name, e.g. chrome, whatsapp, notepad, settings")},
+          ("name",)),
+    _tool("close_app", "Close an app when the user says close/quit it; force=true kills a frozen app (asks first).",
+          {"name": _str("app name"), "force": _bool("force-close a frozen/unresponsive app")}, ("name",)),
+    _tool("open_website", "Open a website or a Google search in a browser.",
+          {"url_or_query": _str("URL/domain or search text"),
+           "browser": _str("chrome, edge, firefox or brave when the user names one; empty = default browser")},
+          ("url_or_query",)),
+    _tool("play_youtube", "Play a song or video on YouTube.",
+          {"query": _str("song or video"), "browser": _str("browser the user named, if any")}, ("query",)),
     _tool("list_windows", "List the titles of open windows."),
     _tool("focus_window", "Bring an open window to the front.", {"title": _str("part of the window title")}, ("title",)),
     _tool("type_text", "Type text into an app, as if on the keyboard. Open/focus the app first.",
@@ -199,7 +249,30 @@ TOOLS = [
     _tool("lock_pc", "Lock the PC, only when the user asks."),
     _tool("power_action", "Shut down, restart or sleep the PC, or cancel a pending shutdown (asks first).",
           {"action": {"type": "string", "enum": ["shutdown", "restart", "sleep", "cancel"]}}, ("action",)),
+    _tool("remember", "Save a fact the user wants you to remember permanently (people, dates, preferences).",
+          {"fact": _str("the fact, written as a full sentence")}, ("fact",)),
+    _tool("forget", "Delete a remembered fact.", {"fact": _str("words from the fact to forget")}, ("fact",)),
+    _tool("daily_briefing", "Morning/daily briefing: weather, top news, reminders and remembered dates. Use for "
+          "'good morning', 'brief me', 'what's my day'."),
 ]
+
+
+def daily_briefing() -> dict:
+    out: dict = {"date": f"{datetime.now():%A, %d %B %Y}"}
+    try:
+        w = weather.get_weather()
+        out["weather"] = {"location": w["location"], "now": w["current"], "today": w["daily"][0]}
+    except Exception as e:  # noqa: BLE001
+        out["weather"] = f"unavailable ({e})"
+    try:
+        out["top_news"] = [a["headline"] for a in search.get_news()["articles"][:5]]
+    except Exception as e:  # noqa: BLE001
+        out["top_news"] = f"unavailable ({e})"
+    out["reminders"] = agent.list_reminders()["reminders"]
+    out["remembered"] = [m["fact"] for m in store.memories()[-15:]]
+    out["how_to_answer"] = ("A warm spoken briefing under 90 words: greeting, weather, 2-3 headlines, and any "
+                            "reminders or remembered dates coming up soon.")
+    return out
 
 
 def power_action(action: str, confirmed: bool = False) -> dict:
@@ -220,10 +293,14 @@ TOOL_FUNCS = {
     "set_clipboard": agent.set_clipboard, "set_reminder": agent.set_reminder, "list_reminders": agent.list_reminders,
     "set_volume": pc.set_volume, "media_control": pc.media_control, "take_screenshot": pc.take_screenshot,
     "lock_pc": pc.lock_pc, "power_action": power_action,
+    "read_document": docs.read_document, "create_document": docs.create_document,
+    "organize_folder": docs.organize_folder, "remember": store.remember, "forget": store.forget,
+    "daily_briefing": daily_briefing,
 }
 TOOL_PARAMS = {t["function"]["name"]: set(t["function"]["parameters"]["properties"]) for t in TOOLS}
 # tools that return {"needs_confirmation"} until called again after the user says yes
-CONFIRMABLE = {"run_command", "write_file", "move_path", "delete_path", "power_action"}
+CONFIRMABLE = {"run_command", "write_file", "move_path", "delete_path", "power_action", "create_document",
+               "organize_folder", "close_app"}
 
 
 def _short(value, n: int = 60) -> str:
@@ -235,6 +312,12 @@ TOOL_STATUS = {
     "web_search": lambda a: f"searching: {a.get('query', '')}",
     "get_news": lambda a: f"checking news{': ' + a['topic'] if a.get('topic') else ''}",
     "get_weather": lambda a: "checking the weather",
+    "read_document": lambda a: f"reading {Path(str(a.get('path', 'document'))).name}",
+    "create_document": lambda a: f"creating {Path(str(a.get('path', 'document'))).name}",
+    "organize_folder": lambda a: f"organising {_short(a.get('path', 'downloads'), 30)}",
+    "remember": lambda a: "remembering that",
+    "forget": lambda a: "forgetting that",
+    "daily_briefing": lambda a: "getting your briefing",
     "speed_test": lambda a: "running a speed test",
     "system_info": lambda a: "checking your PC",
     "run_command": lambda a: f"running: {_short(a.get('command', ''), 40)}",
@@ -264,7 +347,7 @@ _pending: dict[tuple[str, str, str], dict] = {}
 EXPLICIT_ONLY = {
     "take_screenshot": re.compile(r"screen\s*shot|screen\s*grab|snap\s*shot|\bss\b|capture (the |my )?screen|print\s*screen", re.I),
     "lock_pc": re.compile(r"\block", re.I),
-    "close_app": re.compile(r"\b(close|quit|exit|kill|stop)\b", re.I),
+    "close_app": re.compile(r"\b(close|quit|exit|kill|stop|end|terminate)\b", re.I),
 }
 
 
@@ -349,14 +432,26 @@ MODELS = [GROQ_MODEL] + [m.strip() for m in os.getenv("GROQ_FALLBACK_MODELS", FA
 MODELS = list(dict.fromkeys(MODELS))
 
 
+LANGUAGE_RULES = {
+    "english": "Reply in English. ",
+    "telugu": "Reply in Telugu, written in Telugu script, unless the user clearly wants English. Keep names, "
+              "file names and technical terms as they are. ",
+    "hindi": "Reply in Hindi, written in Devanagari script, unless the user clearly wants English. Keep names, "
+             "file names and technical terms as they are. ",
+    "auto": "Reply in the same language the user used (Telugu in Telugu script, Hindi in Devanagari). ",
+}
+
+
 def system_prompt(on_phone: bool = False) -> str:
     now = datetime.now().astimezone()
     loc = weather.home_location().get("name") or "unknown"
     folders = agent.known_folders()
+    settings = store.settings()
     return (
-        "You are Karen, the user's personal AI agent running on their Windows PC. You don't just chat: you get "
-        "work done with your tools - running PowerShell commands, managing files and folders, opening apps and "
-        "websites, typing and pressing keys in apps, speed tests, reminders, web search. "
+        f"You are {settings['wake_word']}, the user's personal AI agent running on their Windows PC. You don't just "
+        "chat: you get work done with your tools - running PowerShell commands, managing files and folders, reading "
+        "and creating Word/PDF documents, opening apps and websites, typing and pressing keys in apps, speed tests, "
+        "reminders, web search, and remembering things. "
         "For a task: work out the steps, call tools one after another, read every result, fix errors by trying "
         "another way, and keep going until the task is really finished. Don't ask permission for normal steps and "
         "don't stop halfway to report progress. If a tool result says needs_confirmation, stop and ask the user, "
@@ -369,8 +464,11 @@ def system_prompt(on_phone: bool = False) -> str:
         "with units (like ₹15,458 or 27°C). "
         "When the user asks for code to read, write complete code in fenced code blocks with the language and a "
         "filename on the opening fence line, like ```python hello.py; it is shown on screen, so outside the code "
-        "write one short sentence. When they want a file created, use write_file instead. "
-        f"User's folders: Desktop {folders['desktop']}, Documents {folders['documents']}, "
+        "write one short sentence. When they want a file created, use write_file (or create_document for Word/PDF). "
+        "When the user tells you something to remember, use remember. "
+        + LANGUAGE_RULES[settings["language"]]
+        + store.memory_prompt()
+        + f"User's folders: Desktop {folders['desktop']}, Documents {folders['documents']}, "
         f"Downloads {folders['downloads']}. "
         + ("The user is talking to you from their phone, not at the PC: PC actions happen on the PC, so say "
            "'on your PC'. " if on_phone else "")
@@ -537,6 +635,7 @@ def run_turn(user_text: str, on_phone: bool = False):
     ctx = {"turn": _turn_counter, "user_text": user_text, "last_reply": last_reply}
 
     final = ""
+    steps: list[dict] = []
     executed: set[tuple[str, str]] = set()
     no_tools = False
     nudged = False
@@ -602,7 +701,9 @@ def run_turn(user_text: str, on_phone: bool = False):
                     args = {}
                 yield ("tool", c["name"], args)
                 result = run_tool(c["name"], args, ctx)
-                yield ("step", step_summary(c["name"], args, result))
+                summary = step_summary(c["name"], args, result)
+                steps.append(summary)
+                yield ("step", summary)
                 text = json.dumps(result, ensure_ascii=False)
                 print(f"  tool {c['name']}({_short(json.dumps(args, ensure_ascii=False), 120)}) -> {text[:160]}")
                 convo.append({"role": "tool", "tool_call_id": c["id"] or f"call_{step}_{i}", "content": text[:4000]})
@@ -617,6 +718,8 @@ def run_turn(user_text: str, on_phone: bool = False):
         with history_lock:
             history.append({"role": "assistant", "content": reply})
             del history[:-MAX_HISTORY]
+        if final.strip():
+            store.log_exchange(user_text, split_code(final)[0] or final.strip(), "phone" if on_phone else "pc", steps)
 
 
 # ---------------------------------------------------------------------------
@@ -750,7 +853,9 @@ class SpeechStream:
             break
 
     def filler(self, text: str | None = None) -> None:
-        # once per turn, and only before the answer itself has started
+        # once per turn, only before the answer has started, and only when replies are in English
+        if store.settings()["language"] != "english":
+            return
         if not self.muted and not self.started and not self.filled:
             self.filled = True
             self._queue(text or random.choice(FILLERS), fn=_filler_clip)
@@ -788,12 +893,17 @@ def chat_events(text: str, speak: bool, on_phone: bool = False):
     marks: dict[str, float] = {}
     has_code = announced_code = False
 
-    def audio():
+    def clip_event(clip) -> str:
         nonlocal seq
+        seq += 1
+        if isinstance(clip, dict):  # Telugu/Hindi without Sarvam: the device speaks it
+            return event(t="say", seq=seq - 1, text=clip["say"], lang=clip["lang"])
+        return event(t="audio", seq=seq - 1, data=clip)
+
+    def audio():
         for clip in speech.take():
             marks.setdefault("first_audio", time.time() - t0)
-            yield event(t="audio", seq=seq, data=clip)
-            seq += 1
+            yield clip_event(clip)
 
     # Run the turn (LLM + tools) in a worker thread so finished TTS clips can
     # be sent while a slow tool such as web search is still running.
@@ -870,8 +980,7 @@ def chat_events(text: str, speak: bool, on_phone: bool = False):
 
         for clip in speech.take(block=True):
             marks.setdefault("first_audio", time.time() - t0)
-            yield event(t="audio", seq=seq, data=clip)
-            seq += 1
+            yield clip_event(clip)
         yield event(t="done")
         timing = "  ".join(f"{k}={v:.1f}s" for k, v in marks.items())
         print(f"  timing: {timing}  total={time.time() - t0:.1f}s")
@@ -985,7 +1094,7 @@ def api_transcribe(audio: UploadFile = File(...), mime_type: str = Form("audio/w
         if len(audio_bytes) < 1000:
             return {"transcript": ""}
         started = time.time()
-        transcript = transcribe(audio_bytes, mime_type)
+        transcript = transcribe(audio_bytes, mime_type, purpose)
         took = f"(speech-to-text {time.time() - started:.1f}s, {len(audio_bytes) // 1024} KB)"
         if transcript and purpose == "wake":
             print(f"  asleep, heard: {transcript}   {took}")
@@ -1002,7 +1111,7 @@ def api_chat(body: ChatIn, request: Request):
     if not text:
         return JSONResponse({"error": "empty message"}, status_code=400)
     return StreamingResponse(
-        chat_events(text, body.speak, on_phone=not is_local(request)),
+        chat_events(text, body.speak and store.settings()["speak_replies"], on_phone=not is_local(request)),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
@@ -1017,7 +1126,9 @@ class ToolIn(BaseModel):
 
 
 # PC actions the Android app may ask this PC to perform (its own brain runs on the phone)
-PHONE_APP_TOOLS = set(TOOL_FUNCS) - {"web_search", "get_news", "get_weather", "speed_test"}  # phone does these itself
+# the phone does these itself (its own search, memory and briefing)
+PHONE_APP_TOOLS = set(TOOL_FUNCS) - {"web_search", "get_news", "get_weather", "speed_test", "remember", "forget",
+                                     "daily_briefing"}
 
 
 @app.post("/api/tool")
@@ -1070,6 +1181,72 @@ def desktop_show(request: Request):
         return JSONResponse({"shown": False}, status_code=404)
     show_window_hook()
     return {"shown": True}
+
+
+class SettingsIn(BaseModel):
+    wake_word: str | None = None
+    voice: str | None = None
+    language: str | None = None
+    speak_replies: bool | None = None
+
+
+@app.get("/api/settings")
+def get_settings():
+    return {"settings": store.settings(), "voices": store.VOICES,
+            "languages": {k: v["label"] for k, v in store.LANGUAGES.items()},
+            "indian_voice": "sarvam" if SARVAM_API_KEY else "device"}
+
+
+@app.post("/api/settings")
+def post_settings(body: SettingsIn):
+    try:
+        return {"settings": store.update_settings({k: v for k, v in body.model_dump().items() if v is not None})}
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.get("/api/history")
+def get_history():
+    return {"conversations": store.history()}
+
+
+@app.delete("/api/history")
+def delete_history():
+    store.clear_history()
+    return {"ok": True}
+
+
+@app.get("/api/memory")
+def get_memory():
+    return {"memories": store.memories()}
+
+
+class ForgetIn(BaseModel):
+    fact: str
+
+
+@app.post("/api/memory/forget")
+def post_forget(body: ForgetIn):
+    return store.forget(body.fact)
+
+
+@app.post("/api/extract")
+def api_extract(file: UploadFile = File(...)):
+    """Text of a shared document (the phone app sends PDFs/Word files here to read them)."""
+    import tempfile
+
+    name = Path(file.filename or "file").name
+    data = file.file.read(30 * 1024 * 1024 + 1)
+    if len(data) > 30 * 1024 * 1024:
+        return JSONResponse({"error": "file is larger than 30 MB"}, status_code=413)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / name
+        path.write_bytes(data)
+        try:
+            text, info = docs.extract_text(path)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"error": str(e)}, status_code=422)
+    return {"name": name, "text": text[:60000], "truncated": len(text) > 60000, **info}
 
 
 @app.post("/api/reset")

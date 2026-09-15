@@ -49,6 +49,39 @@ PROTECTED_PROCESSES = {"explorer.exe", "csrss.exe", "winlogon.exe", "lsass.exe",
 SKIP_DIRS = {"node_modules", ".git", "venv", ".venv", "__pycache__", "appdata", "site-packages", "$recycle.bin"}
 
 
+BROWSERS = {
+    "chrome": "chrome.exe", "google chrome": "chrome.exe", "edge": "msedge.exe", "microsoft edge": "msedge.exe",
+    "firefox": "firefox.exe", "brave": "brave.exe", "opera": "opera.exe",
+}
+
+
+def app_exe(exe: str) -> str | None:
+    """Full path of an installed program, from Windows' App Paths registry or its usual install folder."""
+    import winreg
+
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(hive, rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}") as key:
+                path = winreg.QueryValue(key, None).strip('"')
+                if path and Path(path).exists():
+                    return path
+        except OSError:
+            continue
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    guesses = {
+        "chrome.exe": [r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                       r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                       local / r"Google\Chrome\Application\chrome.exe"],
+        "msedge.exe": [r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                       r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"],
+        "firefox.exe": [r"C:\Program Files\Mozilla Firefox\firefox.exe"],
+        "brave.exe": [r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+                      local / r"BraveSoftware\Brave-Browser\Application\brave.exe"],
+        "code.exe": [local / r"Programs\Microsoft VS Code\Code.exe"],
+    }
+    return next((str(g) for g in guesses.get(exe.lower(), []) if Path(g).exists()), None)
+
+
 def _clean_name(name: str) -> str:
     name = re.sub(r"\b(the|app|application|program|please)\b", " ", name.lower())
     return re.sub(r"\s+", " ", name).strip()
@@ -105,6 +138,11 @@ def open_app(name: str) -> dict:
         os.startfile(target)
         return {"opened": name}
 
+    exe = app_exe(BROWSERS.get(n) or f"{target or n.replace(' ', '')}.exe".replace(".exe.exe", ".exe"))
+    if exe:
+        subprocess.Popen([exe], creationflags=NO_WINDOW)
+        return {"opened": name, "program": Path(exe).name}
+
     app = _find_start_app(n)
     if app:
         subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{app['AppID']}"], creationflags=NO_WINDOW)
@@ -116,7 +154,7 @@ def open_app(name: str) -> dict:
     return {"error": f"Couldn't find an app called '{name}' on this PC."}
 
 
-def close_app(name: str) -> dict:
+def close_app(name: str, force: bool = False, confirmed: bool = False) -> dict:
     n = _clean_name(name)
     image = PROCESS_ALIASES.get(n) or (n if n.endswith(".exe") else f"{n.replace(' ', '')}.exe")
     if image.lower() in PROTECTED_PROCESSES:
@@ -127,33 +165,50 @@ def close_app(name: str) -> dict:
     match = next((p for p in names if p.lower() == image.lower()), None)
     if not match:
         return {"error": f"{name} doesn't seem to be running."}
+    if force:
+        if not confirmed:
+            return {"needs_confirmation": True,
+                    "will_do": f"force-close every {match} process (unsaved work in {name} will be lost)"}
+        out = subprocess.run(["taskkill", "/F", "/T", "/IM", match], capture_output=True, text=True,
+                             creationflags=NO_WINDOW)
+        return {"force_closed": name} if out.returncode == 0 else {"error": out.stderr.strip() or out.stdout.strip()}
     # no /F: apps close gracefully and can still ask to save work
     subprocess.run(["taskkill", "/IM", match], capture_output=True, creationflags=NO_WINDOW)
-    return {"closed": name}
+    return {"closed": name, "note": "asked it to close; if it's frozen, say force close"}
 
 
 # ---------------------------------------------------------------------------
 # Web / media
 # ---------------------------------------------------------------------------
-def open_website(url_or_query: str) -> dict:
+def open_website(url_or_query: str, browser: str = "") -> dict:
     s = url_or_query.strip()
     if re.match(r"^(https?://)?[\w-]+(\.[\w-]+)+(/\S*)?$", s):
         url = s if s.startswith("http") else f"https://{s}"
     else:
         url = f"https://www.google.com/search?q={quote_plus(s)}"
+    want = _clean_name(browser) if browser else ""
+    if want and want != "default":
+        exe_name = BROWSERS.get(want)
+        if not exe_name:
+            return {"error": f"unknown browser '{browser}'; use chrome, edge, firefox, brave or opera"}
+        exe = app_exe(exe_name)
+        if not exe:
+            return {"error": f"{browser} doesn't seem to be installed on this PC"}
+        subprocess.Popen([exe, url], creationflags=NO_WINDOW)
+        return {"opened": url, "in": Path(exe).stem}
     webbrowser.open(url)
-    return {"opened": url}
+    return {"opened": url, "in": "default browser"}
 
 
-def play_youtube(query: str) -> dict:
+def play_youtube(query: str, browser: str = "") -> dict:
     r = http.get("https://www.youtube.com/results", params={"search_query": query},
                  headers={"User-Agent": BROWSER_UA, "Accept-Language": "en-IN,en;q=0.9"}, timeout=12)
     r.encoding = "utf-8"
     m = re.search(r'"videoRenderer":\{"videoId":"([\w-]{11})".*?"title":\{"runs":\[\{"text":"(.*?)"\}', r.text)
     if not m:
-        webbrowser.open(f"https://www.youtube.com/results?search_query={quote_plus(query)}")
+        open_website(f"https://www.youtube.com/results?search_query={quote_plus(query)}", browser)
         return {"opened": "YouTube search results", "query": query}
-    webbrowser.open(f"https://www.youtube.com/watch?v={m.group(1)}")
+    open_website(f"https://www.youtube.com/watch?v={m.group(1)}", browser)
     return {"playing": m.group(2).encode().decode("unicode_escape", "ignore"), "on": "YouTube"}
 
 

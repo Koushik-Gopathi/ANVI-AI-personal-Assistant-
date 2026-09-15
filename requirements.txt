@@ -4,3 +4,8 @@ requests
 python-dotenv
 python-multipart
 pillow
+cryptography
+pypdf
+python-docx
+python-pptx
+reportlab

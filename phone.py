@@ -18,7 +18,6 @@ DATA_DIR = Path(os.getenv("ANVI_HOME") or Path(__file__).resolve().parent) / ".a
 SECRET_FILE = DATA_DIR / "pairing_secret"
 CERT_FILE = DATA_DIR / "cert.pem"
 KEY_FILE = DATA_DIR / "key.pem"
-CERT_IPS_FILE = DATA_DIR / "cert_ips.txt"
 COOKIE_NAME = "anvi_pair"
 
 
@@ -50,11 +49,18 @@ def ensure_certificate(ip: str) -> tuple[str, str]:
     """Self-signed cert for this PC's LAN IP, regenerated when the IP changes."""
     DATA_DIR.mkdir(exist_ok=True)
     ips = sorted({ip, "127.0.0.1"})
-    if CERT_FILE.exists() and KEY_FILE.exists() and CERT_IPS_FILE.exists() \
-            and CERT_IPS_FILE.read_text().split() == ips:
-        return str(CERT_FILE), str(KEY_FILE)
-
     from cryptography import x509
+
+    # The addresses live inside the certificate itself. (A separate .txt file used to hold them, but
+    # antivirus ransomware protection can block an unknown app from changing .txt files.)
+    if CERT_FILE.exists() and KEY_FILE.exists():
+        try:
+            existing = x509.load_pem_x509_certificate(CERT_FILE.read_bytes())
+            san = existing.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+            if sorted(str(a) for a in san.get_values_for_type(x509.IPAddress)) == ips:
+                return str(CERT_FILE), str(KEY_FILE)
+        except (ValueError, x509.ExtensionNotFound):
+            pass  # unreadable or old certificate: make a new one
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.x509.oid import NameOID
@@ -79,5 +85,4 @@ def ensure_certificate(ip: str) -> tuple[str, str]:
     KEY_FILE.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                            serialization.NoEncryption()))
     CERT_FILE.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-    CERT_IPS_FILE.write_text(" ".join(ips))
     return str(CERT_FILE), str(KEY_FILE)

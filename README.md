@@ -16,14 +16,14 @@ Opens http://127.0.0.1:8000 (on Windows you can also double-click `start_karen.b
 
 ## Desktop app (Windows)
 
-`Karen.exe` gives Karen its own window and a tray icon instead of a browser tab, and keeps listening for "Karen" while hidden in the tray.
+`Karen.exe` gives Karen her own window instead of a browser tab. She runs only while the window is open and listens for "Karen" the whole time; closing the window quits her completely, so nothing runs in the background.
 
 ```bash
-pip install -r requirements.txt pywebview pystray pyinstaller
+pip install -r requirements.txt pywebview pyinstaller
 build_desktop.bat          # -> dist\Karen\Karen.exe  (reads the .env in this folder)
 ```
 
-Or run it without building: `pythonw desktop.py`. Closing the window hides Karen to the tray; right-click the tray icon for **Wake / sleep**, **Start with Windows** and **Quit**. **Ctrl+Alt+A** wakes her from any app.
+Or run it without building: `pythonw desktop.py`. While she's open, **Ctrl+Alt+A** brings her to the front and wakes her from any app.
 
 ## Android app
 
@@ -94,7 +94,7 @@ search.py        web search + page reading, news
 weather.py       Open-Meteo weather
 net.py           shared HTTP session (Windows certificate store)
 phone.py         phone access: LAN HTTPS certificate, QR pairing secret
-desktop.py       Windows desktop app: window, tray icon, hotkey, start with Windows
+desktop.py       Windows desktop app: window, microphone permission, hotkey
 mobile/          Flutter Android app (own agent brain + phone actions + PC tools via /api/tool)
 web/             UI: wake word, voice activity detection, streamed playback, step list, code panel, orb
 ```

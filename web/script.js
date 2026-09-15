@@ -898,6 +898,11 @@ function targets(t) {
 }
 
 function frame(now) {
+  // asleep the orb only drifts slowly: 30 fps is enough and halves the GPU work
+  if (state === "sleep" && now - last < 32) {
+    requestAnimationFrame(frame);
+    return;
+  }
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
   const t = now / 1000;

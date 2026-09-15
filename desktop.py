@@ -1,7 +1,6 @@
-"""Karen desktop app: its own window + tray icon, always listening for "Karen".
+"""Karen desktop app: her own window. She runs only while it is open; closing it quits her.
 
 Run:    pythonw desktop.py            (or Karen.exe after packaging)
-        desktop.py --background       start hidden in the tray (used for "Start with Windows")
 Build:  build_desktop.bat
 """
 
@@ -29,32 +28,21 @@ def _find_home() -> Path:
 HOME = _find_home()
 os.environ.setdefault("ANVI_HOME", str(HOME))
 os.environ["ANVI_OPEN_BROWSER"] = "0"
-# Let the window play sound and listen without a click first, and keep timers
-# and audio running while it is hidden in the tray (the wake word needs both).
-os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = " ".join([
-    "--autoplay-policy=no-user-gesture-required",
-    "--disable-background-timer-throttling",
-    "--disable-renderer-backgrounding",
-    "--disable-backgrounding-occluded-windows",
-])
+# let the window play sound and listen for "Karen" without a click first
+os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = "--autoplay-policy=no-user-gesture-required"
 
 if getattr(sys, "frozen", False) and sys.stdout is None:  # windowed exe has no console
     (HOME / ".anvi").mkdir(exist_ok=True)
     sys.stdout = sys.stderr = open(HOME / ".anvi" / "anvi.log", "a", encoding="utf-8", buffering=1)
 
-import pystray  # noqa: E402
 import webview  # noqa: E402
-from PIL import Image  # noqa: E402
 
 import main  # noqa: E402
 
 APP_URL = f"http://127.0.0.1:{main.PORT}"
-RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 HOTKEY_TEXT = "Ctrl+Alt+A"
 
 window: webview.Window | None = None
-tray: pystray.Icon | None = None
-quitting = False
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +94,7 @@ def start_server() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Window / tray actions
+# Window actions
 # ---------------------------------------------------------------------------
 def show_window(*_):
     if window:
@@ -121,82 +109,24 @@ def toggle_listening(*_):
         window.evaluate_js("toggle()")
 
 
-def on_closing():
-    # the close button hides Karen to the tray so it keeps listening for her name
-    if quitting:
-        return True
-    window.hide()
-    return False
-
-
-def quit_app(*_):
-    global quitting
-    quitting = True
-    if tray:
-        tray.stop()
-    if window:
-        window.destroy()
-
-
-def _launch_command() -> str:
-    if getattr(sys, "frozen", False):
-        return f'"{sys.executable}" --background'
-    pythonw = Path(sys.executable).with_name("pythonw.exe")
-    return f'"{pythonw if pythonw.exists() else sys.executable}" "{Path(__file__).resolve()}" --background'
-
-
-RUN_VALUE = "Karen"
-
-
-def _migrate_start_with_windows() -> None:
-    """The app used to be called ANVI: carry "Start with Windows" over to the new name."""
+def _remove_old_autostart() -> None:
+    """Earlier versions could start with Windows and hide in the tray; Karen now runs only when opened."""
     import winreg
 
+    run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
-            winreg.QueryValueEx(key, "ANVI")
-            winreg.DeleteValue(key, "ANVI")
-            winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ, _launch_command())
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, run_key, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
+            for name in ("ANVI", "Karen"):
+                try:
+                    winreg.DeleteValue(key, name)
+                except OSError:
+                    pass
     except OSError:
         pass
 
 
-def starts_with_windows(_item=None) -> bool:
-    import winreg
-
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
-            winreg.QueryValueEx(key, RUN_VALUE)
-            return True
-    except OSError:
-        return False
-
-
-def toggle_start_with_windows(*_):
-    import winreg
-
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
-        if starts_with_windows():
-            winreg.DeleteValue(key, RUN_VALUE)
-        else:
-            winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ, _launch_command())
-
-
-def run_tray() -> None:
-    global tray
-    icon_image = Image.open(main.WEB_DIR / "icon-192.png")
-    tray = pystray.Icon("Karen", icon_image, "Karen", menu=pystray.Menu(
-        pystray.MenuItem("Show Karen", show_window, default=True),
-        pystray.MenuItem(f"Wake / sleep  ({HOTKEY_TEXT})", toggle_listening),
-        pystray.MenuItem("Start with Windows", toggle_start_with_windows, checked=starts_with_windows),
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Quit Karen", quit_app),
-    ))
-    tray.run_detached()
-
-
 def listen_for_hotkey() -> None:
-    """Ctrl+Alt+A from any app: show Karen and wake her up (or put her to sleep)."""
+    """Ctrl+Alt+A from any app, while Karen is open: bring her to the front and wake her (or put her to sleep)."""
     user32 = ctypes.windll.user32
     MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, WM_HOTKEY = 0x0001, 0x0002, 0x4000, 0x0312
     if not user32.RegisterHotKey(None, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, ord("A")):
@@ -218,26 +148,23 @@ def _single_instance() -> bool:
 def run() -> None:
     global window
     if not _single_instance():
-        # already running (maybe hidden in the tray): bring that window to the front instead
+        # already open: bring that window to the front instead
         try:
             request = urllib.request.Request(f"{APP_URL}/api/desktop/show", method="POST")
             urllib.request.urlopen(request, timeout=3).close()
         except OSError:
-            ctypes.windll.user32.MessageBoxW(None, "Karen is already running. Look for its icon in the system tray.",
+            ctypes.windll.user32.MessageBoxW(None, "Karen is already open.",
                                              "Karen", 0x40)
         return
 
-    _migrate_start_with_windows()
+    _remove_old_autostart()
     start_server()
     main.show_window_hook = show_window
     _allow_microphone()
-    background = "--background" in sys.argv
     window = webview.create_window(
         "Karen", f"{APP_URL}/?app=desktop", width=1100, height=760, min_size=(420, 560),
-        background_color="#080B14", hidden=background,
+        background_color="#080B14",
     )
-    window.events.closing += on_closing
-    run_tray()
     threading.Thread(target=listen_for_hotkey, daemon=True).start()
     if os.getenv("ANVI_DEBUG") == "1":
         def report():
@@ -249,6 +176,8 @@ def run() -> None:
                     " recording: !!recorder, status: statusEl.textContent})"), flush=True)
         threading.Thread(target=report, daemon=True).start()
     webview.start(private_mode=False, storage_path=str(HOME / ".anvi" / "webview"))
+    # the window was closed: stop everything (server, listening, workers) right away
+    os._exit(0)
 
 
 if __name__ == "__main__":

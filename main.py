@@ -40,7 +40,7 @@ import phone  # noqa: E402
 import search  # noqa: E402
 import store  # noqa: E402
 import weather  # noqa: E402
-from net import http  # noqa: E402
+from net import friendly_error, http  # noqa: E402
 
 # Windows consoles default to cp1252; don't crash when printing ₹ or Telugu
 for _stream in (sys.stdout, sys.stderr):
@@ -124,8 +124,10 @@ def clean_for_speech(text: str) -> str:
     text = re.sub(r"\*\*|__|`|#+\s?", "", text)
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"^\s*[-*]\s+", "", text, flags=re.MULTILINE)
-    text = text.replace("°C", " degrees").replace("°F", " degrees Fahrenheit").replace("°", " degrees")
-    text = re.sub(r"₹\s?", "rupees ", text)
+    lang = indic_language(text)
+    degrees, rupees = {"te-IN": (" డిగ్రీలు", "రూపాయలు "), "hi-IN": (" डिग्री", "रुपये ")}.get(lang, (" degrees", "rupees "))
+    text = text.replace("°C", degrees).replace("°F", degrees + " Fahrenheit").replace("°", degrees)
+    text = re.sub(r"₹\s?", rupees, text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -545,7 +547,7 @@ def groq_stream(messages: list[dict], use_tools: bool, model: str):
         payload["tool_choice"] = "auto"
 
     r = http.post("https://api.groq.com/openai/v1/chat/completions",
-                  headers={"Authorization": f"Bearer {GROQ_API_KEY}"}, json=payload, stream=True, timeout=(10, 90))
+                  headers={"Authorization": f"Bearer {GROQ_API_KEY}"}, json=payload, stream=True, timeout=(15, 60))
     if r.status_code in (413, 429, 503) or (r.status_code == 400 and "tool_use_failed" in r.text):
         wait = _retry_after(r) if r.status_code == 429 else 0
         body = r.text[:200]
@@ -582,6 +584,7 @@ def stream_with_fallback(messages: list[dict], use_tools: bool):
 
     Yields streamed deltas, plus {"_wait": seconds} while waiting.
     """
+    network_failures = 0
     for _ in range(4):
         for model in sorted(MODELS, key=lambda m: _model_free_at.get(m, 0) > time.time()):
             if _model_free_at.get(model, 0) > time.time():
@@ -597,6 +600,14 @@ def stream_with_fallback(messages: list[dict], use_tools: bool):
                     raise
                 _model_free_at[model] = time.time() + max(e.wait, 2 if "413" not in str(e) else 60)
                 print(f"  {model} unavailable ({str(e)[:80]}), trying another model")
+            except requests.RequestException as e:
+                # slow or dropped connection (the session already retried): try again a couple of times
+                network_failures += 1
+                print(f"  network problem talking to Groq ({type(e).__name__}), attempt {network_failures}")
+                if started or network_failures >= 3:
+                    raise
+                yield {"_wait": 2 * network_failures, "_why": "reconnecting"}
+                time.sleep(2 * network_failures)
         wait = min(_model_free_at.values()) - time.time()
         if wait > 45:
             break
@@ -650,7 +661,8 @@ def run_turn(user_text: str, on_phone: bool = False):
             hold = wants_action and not executed and not nudged
             for delta in stream_with_fallback(convo, use_tools=step < MAX_STEPS - 1 and not no_tools):
                 if "_wait" in delta:
-                    yield ("status", f"busy, continuing in {round(delta['_wait'])}s")
+                    why = delta.get("_why", "busy")
+                    yield ("status", f"{why}, continuing in {round(delta['_wait'])}s")
                     continue
                 piece = delta.get("content")
                 if piece:
@@ -986,7 +998,7 @@ def chat_events(text: str, speak: bool, on_phone: bool = False):
         print(f"  timing: {timing}  total={time.time() - t0:.1f}s")
     except Exception as e:  # noqa: BLE001
         print("ERROR:", e)
-        yield event(t="error", error=str(e))
+        yield event(t="error", error=friendly_error(e))
     finally:
         stop.set()
 
@@ -1065,8 +1077,8 @@ def api_error(e: Exception) -> JSONResponse:
         host = requests.utils.urlparse(e.response.url).hostname
         detail = f"{host} {e.response.status_code}: {e.response.text[:200]}"
     else:
-        detail = str(e)
-    print("ERROR:", detail)
+        detail = friendly_error(e)
+    print("ERROR:", e)
     return JSONResponse({"error": detail}, status_code=502)
 
 

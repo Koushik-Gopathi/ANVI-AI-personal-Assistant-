@@ -27,12 +27,16 @@ let statusDetail = ""; // e.g. "searching: gold rate today" while thinking
 const IS_TOUCH = matchMedia("(pointer: coarse)").matches;
 let passive = false; // asleep but listening for "Karen"
 
-const STATUS = {
-  sleep: ["say “Karen” to wake", IS_TOUCH ? "or tap the orb" : "or click the orb · space"],
-  listening: ["listening...", "speak naturally · say “Karen” to sleep"],
-  thinking: ["thinking...", "one moment"],
-  speaking: ["speaking...", "tap to interrupt"],
-};
+let wakeName = "Karen";
+
+function STATUS() {
+  return {
+    sleep: [`say “${wakeName}” to wake`, IS_TOUCH ? "or tap the orb" : "or click the orb · space"],
+    listening: ["listening...", `speak naturally · say “${wakeName}” to sleep`],
+    thinking: ["thinking...", "one moment"],
+    speaking: ["speaking...", "tap to interrupt"],
+  };
+}
 
 function setState(next) {
   state = next;
@@ -41,11 +45,11 @@ function setState(next) {
 }
 
 function renderStatus() {
-  let [s, h] = STATUS[state];
+  let [s, h] = STATUS()[state];
   if (state === "sleep" && !passive) {
     [s, h] = audioCtx && audioCtx.state === "running"
       ? ["tap to wake", IS_TOUCH ? "tap the orb" : "click the orb or press space"]
-      : ["tap anywhere to start", "one tap lets Karen listen for her name"];
+      : ["tap anywhere to start", `one tap lets ${wakeName} listen for her name`];
   }
   statusEl.textContent = state === "thinking" && statusDetail ? statusDetail.replace(/\.+$/, "") + "..." : s;
   statusEl.className = "status" + (state === "sleep" ? " muted" : "");
@@ -315,6 +319,7 @@ async function converse(text, id) {
   const handle = (ev) => {
     if (ev.t === "caption") showReply(ev.text);
     else if (ev.t === "audio") queue.add(ev.data);
+    else if (ev.t === "say") queue.addSay(ev.text, ev.lang);
     else if (ev.t === "code") showCode(ev.blocks);
     else if (ev.t === "step") addStep(ev);
     else if (ev.t === "error") failure = ev.error;
@@ -401,6 +406,27 @@ class SpeechQueue {
     });
   }
 
+  addSay(text, lang) {
+    this.chain = this.chain.then(async () => {
+      if (this.id !== turnId || !window.speechSynthesis) return;
+      const prefix = lang.slice(0, 2);
+      const voice = speechSynthesis.getVoices().find((v) => v.lang.toLowerCase().startsWith(prefix));
+      if (!voice) {
+        if (!warnedNoVoice) showError(`no ${prefix === "te" ? "Telugu" : "Hindi"} voice on this PC — add SARVAM_API_KEY to .env`);
+        warnedNoVoice = true;
+        return;
+      }
+      await new Promise((resolve) => {
+        const u = new SpeechSynthesisUtterance(text);
+        u.voice = voice;
+        u.lang = voice.lang;
+        u.onend = u.onerror = resolve;
+        if (state !== "speaking") setState("speaking");
+        speechSynthesis.speak(u);
+      });
+    });
+  }
+
   async finished() {
     await this.chain;
     if (!this.scheduled || !audioCtx || this.id !== turnId) return;
@@ -410,6 +436,7 @@ class SpeechQueue {
 
   stop() {
     this.id = -1;
+    if (window.speechSynthesis) speechSynthesis.cancel();
     for (const src of this.sources) {
       src.onended = null;
       try { src.stop(); } catch (_) {}
@@ -419,6 +446,7 @@ class SpeechQueue {
 }
 
 let currentQueue = null;
+let warnedNoVoice = false;
 
 function cancelTurn() {
   turnId++;
@@ -498,10 +526,18 @@ codeBtn.addEventListener("click", () => (codeIsOpen() ? closeCode() : openCode()
 // ---------------------------------------------------------------------------
 // Wake word: say "Karen" to wake up, say "Karen" again to go to sleep
 // ---------------------------------------------------------------------------
-// While asleep the browser's built-in speech recognizer listens for the name
-// (Edge/Chrome only). While awake, the Deepgram transcript is checked instead.
+// While asleep, short phrases are sent to speech-to-text to listen for the wake word
+// (see checkWakeWord below); while awake, the normal transcript is checked.
 // "Karen" as speech-to-text may spell it (Karen, Caren, Karan, Karin, Keren...)
-const WAKE_RE = /\b[kc](?:a|e|ae|ai)r+(?:e|a|i|y)n+\b/;
+const KAREN_RE = /\b[kc](?:a|e|ae|ai)r+(?:e|a|i|y)n+\b/;
+let WAKE_RE = KAREN_RE;
+
+function setWakeWord(word) {
+  wakeName = word || "Karen";
+  const words = wakeName.toLowerCase().replace(/[^a-z\s]/g, " ").trim().split(/\s+/).filter(Boolean);
+  WAKE_RE = words.join(" ") === "karen" || !words.length ? KAREN_RE : new RegExp(`\\b${words.join("\\s+")}\\b`);
+  renderStatus();
+}
 const SLEEP_WORDS = new Set(
   "hey hi ok okay go to sleep bye by goodbye good night stop thanks thank you that s all please now shut down standby pause the a".split(" ")
 );
@@ -740,8 +776,9 @@ composer.addEventListener("submit", (e) => {
 });
 
 window.addEventListener("keydown", (e) => {
-  if (!phoneModal.hidden) {
-    if (e.key === "Escape") phoneModal.hidden = true;
+  const openModal = [phoneModal, settingsModal, historyModal].find((m) => !m.hidden);
+  if (openModal) {
+    if (e.key === "Escape") openModal.hidden = true;
     return;
   }
   if (e.target === textInput) {
@@ -754,6 +791,8 @@ window.addEventListener("keydown", (e) => {
   } else if (e.key === "t" || e.key === "T" || e.key === "/") {
     e.preventDefault();
     openComposer();
+  } else if (e.key === "h" || e.key === "H") {
+    openHistory();
   } else if (e.key === "c" || e.key === "C") {
     codeIsOpen() ? closeCode() : openCode();
   } else if (e.key === "Escape") {
@@ -776,6 +815,149 @@ async function firstInteraction() {
 
 // The desktop app allows audio without a click, so start listening for "Karen" immediately.
 if (new URLSearchParams(location.search).get("app") === "desktop") firstInteraction();
+
+// ---------------------------------------------------------------------------
+// Settings and history panels
+// ---------------------------------------------------------------------------
+const settingsModal = $("settingsModal");
+const historyModal = $("historyModal");
+let languageNames = {};
+let indianVoice = "device";
+
+for (const modal of [settingsModal, historyModal]) {
+  modal.addEventListener("click", (e) => {
+    if (e.target === modal || e.target.hasAttribute("data-close")) modal.hidden = true;
+  });
+}
+
+async function loadSettings() {
+  const data = await fetch("/api/settings").then((r) => r.json());
+  languageNames = data.languages;
+  indianVoice = data.indian_voice;
+  setWakeWord(data.settings.wake_word);
+  return data;
+}
+
+function option(value, label, selected) {
+  const o = document.createElement("option");
+  o.value = value;
+  o.textContent = label;
+  o.selected = value === selected;
+  return o;
+}
+
+function updateLangNote() {
+  const lang = $("setLanguage").value;
+  $("langNote").textContent = lang === "english" ? ""
+    : indianVoice === "sarvam" ? "Telugu/Hindi replies use Sarvam AI's voice."
+    : "Telugu/Hindi replies use this computer's own voice if it has one. For a natural voice add SARVAM_API_KEY to .env.";
+}
+
+async function renderMemory() {
+  const list = $("memoryList");
+  const { memories } = await fetch("/api/memory").then((r) => r.json());
+  list.innerHTML = "";
+  if (!memories.length) {
+    list.innerHTML = '<li class="empty">Nothing yet. Say “remember that …”.</li>';
+    return;
+  }
+  for (const m of memories) {
+    const li = document.createElement("li");
+    const text = document.createElement("span");
+    text.textContent = m.fact;
+    const forget = document.createElement("button");
+    forget.textContent = "forget";
+    forget.addEventListener("click", async () => {
+      await fetch("/api/memory/forget", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fact: m.fact }) });
+      renderMemory();
+    });
+    li.append(text, forget);
+    list.appendChild(li);
+  }
+}
+
+async function openSettings() {
+  settingsModal.hidden = false;
+  $("settingsSaved").hidden = true;
+  try {
+    const data = await loadSettings();
+    const s = data.settings;
+    $("setWake").value = s.wake_word;
+    $("setVoice").replaceChildren(...Object.entries(data.voices).map(([k, v]) => option(k, v, s.voice)));
+    $("setLanguage").replaceChildren(...Object.entries(data.languages).map(([k, v]) => option(k, v, s.language)));
+    $("setSpeak").checked = s.speak_replies;
+    updateLangNote();
+    renderMemory();
+  } catch (err) {
+    showError("couldn't load settings");
+  }
+}
+
+$("setLanguage").addEventListener("change", updateLangNote);
+
+$("settingsForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const body = {
+    wake_word: $("setWake").value.trim(),
+    voice: $("setVoice").value,
+    language: $("setLanguage").value,
+    speak_replies: $("setSpeak").checked,
+  };
+  const res = await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body) });
+  const data = await res.json();
+  if (!res.ok) return showError(data.error || "couldn't save settings");
+  setWakeWord(data.settings.wake_word);
+  $("settingsSaved").hidden = false;
+  setTimeout(() => ($("settingsSaved").hidden = true), 2000);
+});
+
+async function openHistory() {
+  historyModal.hidden = false;
+  const list = $("historyList");
+  list.textContent = "Loading…";
+  try {
+    const { conversations } = await fetch("/api/history").then((r) => r.json());
+    list.innerHTML = "";
+    if (!conversations.length) {
+      list.innerHTML = '<p class="empty">No conversations yet.</p>';
+      return;
+    }
+    for (const c of conversations.reverse()) {
+      const section = document.createElement("section");
+      const h = document.createElement("h4");
+      h.textContent = c.started;
+      section.appendChild(h);
+      for (const x of c.exchanges) {
+        const you = document.createElement("div");
+        you.className = "you";
+        you.textContent = x.you;
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = `${x.time}${x.source === "phone" ? " · phone" : ""}${x.steps.length ? " · " + x.steps.map((s) => s.text).join(", ") : ""}`;
+        const karen = document.createElement("div");
+        karen.className = "karen";
+        karen.textContent = x.karen;
+        section.append(you, meta, karen);
+      }
+      list.appendChild(section);
+    }
+  } catch (err) {
+    list.textContent = "Couldn't load history.";
+  }
+}
+
+$("clearHistory").addEventListener("click", async () => {
+  if (!confirm("Delete all conversation history?")) return;
+  await fetch("/api/history", { method: "DELETE" });
+  openHistory();
+});
+
+$("settingsBtn").addEventListener("click", openSettings);
+$("historyBtn").addEventListener("click", openHistory);
+loadSettings().catch(() => {});
+if (window.speechSynthesis) speechSynthesis.getVoices(); // voices load lazily
 
 fetch("/api/health")
   .then((r) => r.json())

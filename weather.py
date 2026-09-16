@@ -40,18 +40,25 @@ def home_location() -> dict:
 
 
 def geocode(place: str) -> dict:
+    """Coordinates for a place name. Names shared by several countries (Kochi is in India and Japan)
+    prefer the user's own country."""
+    home = home_location() if not ANVI_LOCATION or place.strip().lower() != ANVI_LOCATION.lower() else {}
+    home_name = (home or {}).get("name", "")
+    if home and place.strip().lower() in home_name.lower():
+        return home  # "Kochi" when the user is in Kochi, India
     r = http.get(
         "https://geocoding-api.open-meteo.com/v1/search",
-        params={"name": place, "count": 1, "language": "en"},
+        params={"name": place, "count": 10, "language": "en"},
         timeout=10,
     )
     r.raise_for_status()
     results = r.json().get("results") or []
     if not results:
         return {}
-    g = results[0]
+    home_country = home_name.rsplit(",", 1)[-1].strip().lower() if home_name else ""
+    g = next((x for x in results if home_country and (x.get("country") or "").lower() == home_country), results[0])
     name = ", ".join(p for p in (g.get("name"), g.get("admin1"), g.get("country")) if p)
-    return {"name": name, "lat": g["latitude"], "lon": g["longitude"]}
+    return {"name": name, "lat": g["latitude"], "lon": g["longitude"], "country": g.get("country", "")}
 
 
 def get_weather(location: str = "") -> dict:

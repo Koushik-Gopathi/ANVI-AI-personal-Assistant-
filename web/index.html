@@ -105,7 +105,45 @@
     </div>
   </div>
 
+  <div class="modal" id="settingsModal" hidden>
+    <div class="modal-card panel-card" role="dialog" aria-labelledby="settingsTitle">
+      <button class="modal-close" data-close aria-label="Close">✕</button>
+      <h2 id="settingsTitle">Settings</h2>
+      <form id="settingsForm" class="settings-form">
+        <label>Wake word
+          <input id="setWake" maxlength="20" autocomplete="off" />
+          <small>Say it to wake and to put her to sleep. A common name works best.</small>
+        </label>
+        <label>Voice (English)
+          <select id="setVoice"></select>
+        </label>
+        <label>Language
+          <select id="setLanguage"></select>
+          <small id="langNote"></small>
+        </label>
+        <label class="check"><input type="checkbox" id="setSpeak" /> Speak replies out loud</label>
+        <div class="row">
+          <button type="submit" class="primary">Save</button>
+          <span id="settingsSaved" class="saved" hidden>Saved ✓</span>
+        </div>
+      </form>
+      <h3>Things Karen remembers</h3>
+      <ul id="memoryList" class="memory-list"></ul>
+    </div>
+  </div>
+
+  <div class="modal" id="historyModal" hidden>
+    <div class="modal-card panel-card wide" role="dialog" aria-labelledby="historyTitle">
+      <button class="modal-close" data-close aria-label="Close">✕</button>
+      <h2 id="historyTitle">History</h2>
+      <div id="historyList" class="history-list"></div>
+      <div class="row"><button id="clearHistory" class="danger">Clear history</button></div>
+    </div>
+  </div>
+
   <div class="corner-row">
+    <button class="corner" id="historyBtn" title="History (H)" aria-label="History">🕘</button>
+    <button class="corner" id="settingsBtn" title="Settings" aria-label="Settings">⚙</button>
     <button class="corner" id="phoneBtn" title="Use Karen on your phone" aria-label="Use Karen on your phone" hidden>📱</button>
     <button class="corner" id="codeBtn" title="Show code (C)" aria-label="Show code" hidden>&lt;/&gt;</button>
     <button class="corner" id="keyboardBtn" title="Type a message (T)" aria-label="Type a message">⌨</button>

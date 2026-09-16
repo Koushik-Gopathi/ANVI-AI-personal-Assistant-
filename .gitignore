@@ -31,3 +31,4 @@ ANVI*.apk
 
 # Kotlin compiler session files
 mobile/android/.kotlin/
+*.apk

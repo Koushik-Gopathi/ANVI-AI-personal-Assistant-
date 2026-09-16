@@ -8,6 +8,7 @@ import 'package:http/io_client.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'config.dart';
+import 'phone_skills.dart';
 
 const _browserUa =
     'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36';
@@ -41,12 +42,12 @@ final phoneTools = [
   _tool('speed_test', "Measure this phone's internet download/upload speed and ping (takes ~15 s)."),
   _tool('open_link', 'Open a website, app link or search on the phone.', {'url': _str('URL, or text to search Google')},
       ['url']),
-  _tool('call_number', "Open the phone's dialer with a number ready to call.", {'number': _str('phone number')},
-      ['number']),
-  _tool('send_sms', 'Open an SMS to a number with the message filled in; the user taps send.',
-      {'number': _str('phone number'), 'message': _str('text')}, ['number', 'message']),
-  _tool('whatsapp_message', 'Open a WhatsApp chat with the message filled in; the user taps send.',
-      {'number': _str('number with country code, e.g. 919876543210'), 'message': _str('text')}, ['number', 'message']),
+  _tool('call_number', "Open the phone's dialer ready to call a contact or number (the user taps call).",
+      {'number': _str('contact name from the phone, or a phone number')}, ['number']),
+  _tool('send_sms', 'Open an SMS to a contact or number with the message filled in; the user taps send.',
+      {'number': _str('contact name or phone number'), 'message': _str('text')}, ['number', 'message']),
+  _tool('whatsapp_message', 'Open a WhatsApp chat with a contact or number with the message filled in; the user taps send.',
+      {'number': _str('contact name or number with country code'), 'message': _str('text')}, ['number', 'message']),
   _tool('set_alarm', 'Set an alarm on the phone.', {
     'hour': {'type': 'integer', 'description': '0-23'},
     'minute': {'type': 'integer', 'description': '0-59'},
@@ -55,9 +56,10 @@ final phoneTools = [
   _tool('set_timer', 'Start a countdown timer on the phone.',
       {'seconds': {'type': 'integer', 'description': 'length in seconds'}, 'label': _str('timer label')}, ['seconds']),
   _tool('navigate_to', 'Open Google Maps directions to a place.', {'place': _str('destination')}, ['place']),
+  ...PhoneSkills.tools,
 ];
 
-String toolStatus(String name, Map args) => switch (name) {
+String toolStatus(String name, Map args) => PhoneSkills.names.contains(name) ? PhoneSkills.status(name, args) : switch (name) {
       'web_search' => 'searching: ${args['query'] ?? ''}',
       'get_news' => 'checking the news',
       'get_weather' => 'checking the weather',
@@ -99,12 +101,16 @@ class Tools {
           return await speedTest();
         case 'open_link':
           return await PhoneActions.openLink(arg('url'));
-        case 'call_number':
-          return await PhoneActions.dial(arg('number'));
-        case 'send_sms':
-          return await PhoneActions.sms(arg('number'), arg('message'));
-        case 'whatsapp_message':
-          return await PhoneActions.whatsapp(arg('number'), arg('message'));
+        case 'call_number' || 'send_sms' || 'whatsapp_message':
+          final resolved = await _numberFor(arg('number'), whatsapp: name == 'whatsapp_message');
+          if (resolved.containsKey('error') || resolved.containsKey('choose')) return resolved;
+          final to = resolved['number'] as String;
+          final result = name == 'call_number'
+              ? await PhoneActions.dial(to)
+              : name == 'send_sms'
+                  ? await PhoneActions.sms(to, arg('message'))
+                  : await PhoneActions.whatsapp(to, arg('message'));
+          return {...result, if (resolved['contact'] != null) 'contact': resolved['contact']};
         case 'set_alarm':
           return await PhoneActions.alarm(number('hour'), number('minute'), arg('label'));
         case 'set_timer':
@@ -112,11 +118,37 @@ class Tools {
         case 'navigate_to':
           return await PhoneActions.navigate(arg('place'));
         default:
+          if (PhoneSkills.names.contains(name)) return await PhoneSkills.run(name, args);
           return await pc.call(name, args, userText, turn, lastReply);
       }
     } catch (e) {
       return {'error': '$e'};
     }
+  }
+
+  /// A phone number from a contact name (or the number itself).
+  Future<Map<String, dynamic>> _numberFor(String who, {required bool whatsapp}) async {
+    if (RegExp(r'^[\d\s()+-]{6,}$').hasMatch(who)) {
+      return {'number': _withCountryCode(who, whatsapp)};
+    }
+    final found = await PhoneSkills.findContact(who);
+    if (found.containsKey('error')) return found;
+    final contacts = (found['contacts'] as List).cast<Map>();
+    final numbers = [for (final c in contacts) for (final n in c['numbers'] as List) (c['name'], '$n')];
+    final unique = {for (final (_, n) in numbers) n.replaceAll(RegExp(r'[^\d+]'), '')};
+    if (unique.length > 1) {
+      return {'choose': true, 'matches': contacts, 'instruction': 'Ask the user which contact/number they mean.'};
+    }
+    return {'number': _withCountryCode(numbers.first.$2, whatsapp), 'contact': numbers.first.$1};
+  }
+
+  static String _withCountryCode(String number, bool whatsapp) {
+    var digits = number.replaceAll(RegExp(r'[^\d+]'), '');
+    if (!whatsapp) return digits;
+    digits = digits.replaceAll('+', '');
+    if (digits.length == 10) digits = '91$digits'; // Indian mobile without country code
+    if (digits.startsWith('0') && digits.length == 11) digits = '91${digits.substring(1)}';
+    return digits;
   }
 
   // --- speed test (Cloudflare) ----------------------------------------------------
@@ -504,6 +536,24 @@ class PcBridge {
       'error': "Can't reach the PC. Make sure Karen is running on it and the phone is on the same network "
           '(or Tailscale).'
     };
+  }
+
+  /// Text of a document (PDF, Word, PowerPoint), read by Karen on the PC.
+  Future<Map<String, dynamic>> extract(String path, String name) async {
+    if (!cfg.hasPc) return {'error': 'reading documents needs Karen on your laptop (scan the setup code)'};
+    for (final base in _candidates) {
+      try {
+        final req = http.MultipartRequest('POST', Uri.parse('$base/api/extract'))
+          ..headers['Cookie'] = 'anvi_pair=${cfg.pairToken}'
+          ..files.add(await http.MultipartFile.fromPath('file', path, filename: name));
+        final r = await http.Response.fromStream(await _client.send(req).timeout(const Duration(seconds: 90)));
+        _working = base;
+        return Map<String, dynamic>.from(jsonDecode(utf8.decode(r.bodyBytes)));
+      } catch (_) {
+        continue;
+      }
+    }
+    return {'error': "Can't reach your laptop to read that document. Open Karen on it (same network)."};
   }
 }
 

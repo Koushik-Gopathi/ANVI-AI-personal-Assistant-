@@ -35,6 +35,10 @@ build_android.bat          # -> Karen.apk
 
 Install the APK, open it, allow the microphone, and scan the setup code from the PC (📱 button → **Android app** tab). That code carries your API keys and pairing secret, so never share it.
 
+Everything happens **on the phone** unless you mention your laptop ("open WhatsApp" opens it on the phone; "open Chrome on my laptop" goes to the PC).
+
+**Settings** (⚙ on the home screen): name/wake word, voice, language (English, Telugu, Hindi, or same as you speak), speak replies, **listen in the background** (keeps listening while the app is in Recents or the screen is off, with a notification), permissions (microphone, contacts, calendar, notification access, unrestricted battery), memory and chat history.
+
 ## Using it
 
 - **Say "Karen"** (or click the orb / press Space) — wake up. She keeps listening, detects when you stop talking, replies, and listens again. "Karen, run a speed test" wakes her and does it in one go.
@@ -60,7 +64,15 @@ While a task runs, the steps she takes appear above the reply (✓ done, ? waiti
 | "Open WhatsApp", "play Believer on YouTube", "volume 30", "take a screenshot" | Apps, media, volume, screenshots (`Pictures\Karen Screenshots`) |
 | "Shut down", "restart" | Asks for a spoken "yes" first, then waits 30 s |
 | "Write a Python script that…" | Code panel with copy button, saved to `generated/`, not spoken |
-| On the phone: "WhatsApp Rahul I'm running late", "set an alarm for 6:30", "navigate to Charminar" | Prepares the message (you tap send), sets alarms/timers, opens Maps |
+| "Summarise LR of ML paper.docx", "read the PDF in Downloads" | Reads Word, PDF and PowerPoint files and summarises them |
+| "Make a Word document on my desktop with notes on transformers", "…as a PDF" | Creates .docx / .pdf files (asks first) |
+| "Organise my Downloads folder" | Sorts files into Documents, Images, Videos… subfolders (asks first) |
+| "Open YouTube in Chrome", "close Notepad", "force close the frozen app" | Browser of your choice; closes or kills apps (asks first) |
+| "Remember my bike service is on Friday", "what do you remember?", "good morning" | Long-term memory; daily briefing with weather, news and reminders |
+| On the phone: "WhatsApp Rahul I'm running late", "call Amma", "set an alarm for 6:30", "navigate to Charminar" | Finds the contact, prepares the message (you tap send), sets alarms/timers, opens Maps |
+| On the phone: "open Instagram", "read my WhatsApp notifications", "turn on the flashlight", "volume 40", "battery?", "open Bluetooth settings" | Phone apps, notifications, flashlight, volume, battery, settings pages |
+| On the phone: "what's on my calendar this week?", "add a meeting tomorrow at 4" | Reads and adds calendar events |
+| Share → Karen from any app | Summarises shared text or links; PDFs/Word files are read through the laptop |
 
 ### Safety
 
@@ -76,6 +88,10 @@ While a task runs, the steps she takes appear above the reply (✓ done, ? waiti
 3. **Anywhere:** install [Tailscale](https://tailscale.com) on the PC and phone (same account), run `tailscale serve --bg 8000` on the PC, and put the `https://….ts.net` address in `.env` as `ANVI_PUBLIC_URL`.
 
 Only paired devices can use Karen: the QR code carries a secret stored as a cookie on the phone. Delete `.anvi\pairing_secret` and restart to unpair every device.
+
+## Telugu and Hindi
+
+Pick the language in Settings (laptop ⚙ or phone ⚙). Karen then listens with Groq Whisper and replies in Telugu or Hindi script. For a natural voice add a free [Sarvam AI](https://sarvam.ai) key to `.env` as `SARVAM_API_KEY` (and rescan the setup code on the phone); without it, the device's own Telugu/Hindi voice is used if one is installed.
 
 ## Web search
 
@@ -95,6 +111,8 @@ weather.py       Open-Meteo weather
 net.py           shared HTTP session (Windows certificate store)
 phone.py         phone access: LAN HTTPS certificate, QR pairing secret
 desktop.py       Windows desktop app: window, microphone permission, hotkey
+docs.py          read Word/PDF/PowerPoint, create .docx/.pdf, organise folders
+store.py         settings, long-term memory, chat history (%LOCALAPPDATA%\Karen)
 mobile/          Flutter Android app (own agent brain + phone actions + PC tools via /api/tool)
 web/             UI: wake word, voice activity detection, streamed playback, step list, code panel, orb
 ```
@@ -102,6 +120,7 @@ web/             UI: wake word, voice activity detection, streamed playback, ste
 ## Notes
 
 - Groq's free tier allows ~8k tokens/minute per model. Karen keeps prompts small, shortens old tool output during long tasks, switches between `openai/gpt-oss-120b` and `openai/gpt-oss-20b`, and waits a few seconds when both are busy. Heavy agent use is smoother on Groq's paid tier.
+- If Groq is slow or the connection drops, Karen retries automatically ("reconnecting…") before giving up with a short message.
 - Settings keep their original `ANVI_*` names in `.env` so existing setups keep working.
 - Works behind antivirus HTTPS scanning (Avast/AVG Web Shield) by using the Windows certificate store.
 - Weather location comes from `ANVI_LOCATION` in `.env`, or is detected from your IP.

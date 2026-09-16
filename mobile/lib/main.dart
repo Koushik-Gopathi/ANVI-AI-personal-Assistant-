@@ -1,11 +1,17 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'assistant.dart';
+import 'background.dart';
 import 'config.dart';
 import 'orb.dart';
+import 'phone_skills.dart';
+import 'screens.dart';
+import 'store.dart';
 
 const bg = Color(0xFF080B14);
 const cyan = Color(0xFF5FE3FF);
@@ -20,6 +26,7 @@ Future<void> main() async {
     statusBarIconBrightness: Brightness.light,
   ));
   final cfg = await AnviConfig.load();
+  await Store.instance.load();
   runApp(AnviApp(cfg: cfg));
 }
 
@@ -223,7 +230,59 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     anvi.addListener(() => setState(() {}));
     anvi.onCode.listen((_) => _showCode());
     anvi.tools.pc.refreshToolDefs(force: true);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _startListening());
+    PhoneSkills.startNotificationListener();
+    _share.setMethodCallHandler((call) async {
+      if (call.method == 'shared') _onShared(Map<String, dynamic>.from(call.arguments as Map));
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _startListening();
+      if (_micAllowed && Store.instance.backgroundListening) {
+        await BackgroundListening.start(Store.instance.wakeWord);
+      }
+      final shared = await _share.invokeMethod<Map>('takeShared');
+      if (shared != null) _onShared(Map<String, dynamic>.from(shared));
+    });
+  }
+
+  // --- things shared to Karen from other apps --------------------------------------
+  static const _share = MethodChannel('karen/share');
+  static const _documents = {'.pdf', '.docx', '.pptx', '.doc', '.ppt'};
+
+  Future<void> _onShared(Map<String, dynamic> shared) async {
+    final text = '${shared['text'] ?? ''}'.trim();
+    final files = (shared['files'] as List? ?? []).map((f) => Map<String, dynamic>.from(f as Map)).toList();
+    final parts = <String>[];
+    if (text.isNotEmpty) {
+      parts.add('I shared this with you:\n"""\n${text.length > 8000 ? text.substring(0, 8000) : text}\n"""');
+    }
+    for (final f in files) {
+      final name = '${f['name']}';
+      final lower = name.toLowerCase();
+      final ext = lower.contains('.') ? lower.substring(lower.lastIndexOf('.')) : '';
+      String? body;
+      if (ext == '.txt' || ext == '.md' || ext == '.csv' || '${f['mime']}'.startsWith('text/')) {
+        try {
+          body = await File('${f['path']}').readAsString();
+        } catch (_) {}
+      } else if (_documents.contains(ext)) {
+        setState(() => anvi.detail = 'reading $name');
+        final r = await anvi.tools.pc.extract('${f['path']}', name);
+        if (r['error'] != null) {
+          parts.add('I shared the document "$name", but it could not be read: ${r['error']}');
+          continue;
+        }
+        body = '${r['text']}';
+      }
+      if (body == null) {
+        parts.add('I shared a file "$name" (${f['mime'] ?? 'unknown type'}); you can\'t open this kind of file.');
+      } else {
+        final clipped = body.length > 12000 ? '${body.substring(0, 12000)}\n[...cut...]' : body;
+        parts.add('I shared the file "$name". Its text:\n"""\n$clipped\n"""');
+      }
+    }
+    if (parts.isEmpty || !mounted) return;
+    parts.add('Summarise it briefly (for a document: the main points), then ask what I want to do with it.');
+    await anvi.ask(parts.join('\n\n'));
   }
 
   bool _micAllowed = false;
@@ -237,7 +296,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Android doesn't allow the mic in the background, so listen only while Karen is on screen
+    // without background listening, Karen only listens while she is on screen
     if (state == AppLifecycleState.paused) anvi.pause();
     if (state == AppLifecycleState.resumed) {
       if (!_micAllowed) {
@@ -337,49 +396,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   void _settings() {
-    final cfg = widget.cfg;
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF0B111D),
-      builder: (ctx) => SafeArea(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          ListTile(
-            leading: Icon(cfg.hasPc ? Icons.computer : Icons.desktop_access_disabled, color: cyan),
-            title: Text(!cfg.hasPc
-                ? 'PC control not set up'
-                : anvi.tools.pc.toolDefs.isNotEmpty
-                    ? 'Connected to your PC'
-                    : "PC set up, but can't reach it right now"),
-            subtitle: Text(cfg.hasPc ? [cfg.publicUrl, cfg.lanUrl].where((u) => u.isNotEmpty).join('\n') : 'Scan the setup code from Karen on your PC'),
-          ),
-          ListTile(
-            leading: const Icon(Icons.qr_code_scanner),
-            title: const Text('Scan setup code again'),
-            onTap: () {
-              Navigator.of(ctx).pop();
-              Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => SetupScreen(cfg: cfg, onDone: () {})));
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.mic_none),
-            title: const Text('Microphone permission'),
-            subtitle: Text(_micAllowed ? 'Allowed' : 'Not allowed — tap to fix'),
-            onTap: () {
-              Navigator.of(ctx).pop();
-              _micAllowed ? openAppSettings() : _startListening();
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.refresh),
-            title: const Text('Start a new conversation'),
-            onTap: () {
-              anvi.forgetConversation();
-              Navigator.of(ctx).pop();
-            },
-          ),
-        ]),
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => SettingsScreen(
+        anvi: anvi,
+        onRescan: () => Navigator.of(context).pushAndRemoveUntil(
+            MaterialPageRoute(builder: (_) => SetupScreen(cfg: widget.cfg, onDone: () {})), (_) => false),
       ),
-    );
+    )).then((_) {
+      if (mounted) setState(() {});
+    });
   }
 
   @override
@@ -464,6 +489,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
               child: Row(children: [
                 _CornerButton(icon: Icons.tune, onTap: _settings),
+                const SizedBox(width: 8),
+                _CornerButton(
+                    icon: Icons.history,
+                    onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const HistoryScreen()))),
                 const Spacer(),
                 if (anvi.code.isNotEmpty) _CornerButton(icon: Icons.code, onTap: _showCode),
                 const SizedBox(width: 8),

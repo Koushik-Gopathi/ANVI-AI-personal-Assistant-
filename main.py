@@ -1175,6 +1175,7 @@ def app_config(request: Request):
         "groq": GROQ_API_KEY or "",
         "deepgram": DEEPGRAM_API_KEY or "",
         "tavily": os.getenv("TAVILY_API_KEY", ""),
+        "sarvam": SARVAM_API_KEY,
         "token": phone.pairing_secret(),
         "lan": f"https://{phone.lan_ip()}:{PHONE_PORT}" if PHONE_ENABLED else "",
         "public": PUBLIC_URL,

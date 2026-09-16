@@ -43,6 +43,16 @@ dependencies:
   permission_handler: 12.0.1
   url_launcher: ^6.3.2
   android_intent_plus: ^6.1.0
+  installed_apps: ^2.1.1
+  flutter_contacts: ^2.1.0
+  notification_listener_service: ^1.0.0
+  torch_light: ^1.1.0
+  battery_plus: ^7.1.1
+  flutter_volume_controller: ^2.0.2
+  flutter_foreground_task: ^10.0.0
+  flutter_tts: ^4.2.5
+  path_provider: ^2.1.6
+  manage_calendar_events: ^2.2.0
 
 dev_dependencies:
   flutter_test:

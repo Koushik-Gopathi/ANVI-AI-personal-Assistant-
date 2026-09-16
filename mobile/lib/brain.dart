@@ -3,7 +3,10 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'dart:io' show SocketException, HandshakeException;
+
 import 'config.dart';
+import 'store.dart';
 import 'tools.dart';
 import 'voice.dart';
 
@@ -66,7 +69,12 @@ class Brain {
 
   void reset() => _history.clear();
 
-  List<Map<String, dynamic>> get _tools => [...phoneTools, ...tools.pc.toolDefs];
+  bool _usePc = false;
+  bool _lastTurnUsedPc = false;
+  static final _pcRequest = RegExp(r'\b(laptop|pc|computer|desktop|windows|system)\b', caseSensitive: false);
+  static final _shortReply = RegExp(r'^\s*(yes|yeah|yep|ok|okay|sure|no|cancel|do it|go ahead)\b', caseSensitive: false);
+
+  List<Map<String, dynamic>> get _tools => [...phoneTools, if (_usePc) ...tools.pc.toolDefs];
 
   String _systemPrompt(String location) {
     final now = DateTime.now();
@@ -76,15 +84,26 @@ class Brain {
     final hour = now.hour % 12 == 0 ? 12 : now.hour % 12;
     final time = '${days[now.weekday - 1]}, ${now.day} ${months[now.month - 1]} ${now.year}, '
         '$hour:${now.minute.toString().padLeft(2, '0')} ${now.hour < 12 ? 'AM' : 'PM'}';
-    final pc = tools.pc.toolDefs.isNotEmpty
-        ? 'Tools marked [on the PC] act on the user\'s Windows PC (commands, files, apps, typing, reminders); say '
-            '"on your PC" when you use them. '
-        : (cfg.hasPc
-            ? 'The user\'s PC is not reachable right now, so you cannot do anything on it; say so if asked. '
-            : 'PC control is not set up in this app. ');
-    return 'You are Karen, the user\'s personal AI agent, running as an app on their Android phone. You don\'t '
-        'just chat: you get things done with your tools - web search, speed tests, calls, messages, alarms, '
-        'timers, maps, and work on their PC. '
+    final store = Store.instance;
+    final pc = _usePc && tools.pc.toolDefs.isNotEmpty
+        ? 'Tools marked [on the PC] act on the user\'s Windows laptop (commands, files, documents, apps, typing, '
+            'reminders); use them only for things the user wants done on the laptop, and say "on your laptop". '
+        : _usePc && cfg.hasPc
+            ? 'The user\'s laptop is not reachable right now (Karen must be open on it, on the same network); say so. '
+            : 'Everything happens on this phone unless the user mentions their laptop or PC. ';
+    const languageRules = {
+      'english': 'Reply in English. ',
+      'telugu': 'Reply in Telugu written in Telugu script, unless the user clearly wants English. Keep names and '
+          'technical terms as they are. ',
+      'hindi': 'Reply in Hindi written in Devanagari script, unless the user clearly wants English. Keep names and '
+          'technical terms as they are. ',
+      'auto': 'Reply in the same language the user used (Telugu in Telugu script, Hindi in Devanagari). ',
+    };
+    return 'You are ${store.wakeWord}, the user\'s personal AI agent, running as an app on their Android phone. '
+        'You don\'t just chat: you get things done with your tools - opening phone apps, calling and messaging '
+        'contacts, reading notifications, calendar, alarms, timers, flashlight, volume, maps, web search, speed '
+        'tests, remembering things, and work on their laptop. '
+        'For people, look up the contact with find_contact (or pass the name to call/message tools). '
         'For a task: work out the steps, call tools one after another, read every result, fix errors by trying '
         'another way, and keep going until it is really finished. If a tool result says needs_confirmation, stop '
         'and ask the user, describing exactly what will happen. Never claim you did something unless a tool result '
@@ -96,6 +115,9 @@ class Brain {
         'no markdown, lists, emojis, tables or URLs. Write numbers as digits with units (like ₹15,458 or 27°C). '
         'When the user asks for code, write complete code in fenced code blocks with the language and a filename on '
         'the opening fence line, like ```python hello.py; outside the code write one short sentence. '
+        '${languageRules[store.language]}'
+        'When the user tells you something to remember, use remember. '
+        '${store.memoryPrompt()}'
         'Current local date and time: $time. User\'s location: $location.';
   }
 
@@ -146,7 +168,10 @@ class Brain {
   /// One conversation turn: streams text, tool, step and status events.
   Stream<BrainEvent> ask(String userText) async* {
     _turn++;
-    await tools.pc.refreshToolDefs();
+    _usePc = cfg.hasPc && (_pcRequest.hasMatch(userText) || (_lastTurnUsedPc && _shortReply.hasMatch(userText)));
+    if (_usePc) await tools.pc.refreshToolDefs();
+    final steps = <(String, String)>[];
+    var usedPc = false;
     final lastReply = _history.lastWhere((m) => m['role'] == 'assistant', orElse: () => {'content': ''})['content'];
     _history.add({'role': 'user', 'content': userText});
     final convo = await _conversation();
@@ -165,7 +190,7 @@ class Brain {
         final hold = wantsAction && executed.isEmpty && !nudged;
         await for (final delta in _streamWithFallback(convo, step < _maxSteps - 1 && !noTools)) {
           if (delta.containsKey('_wait')) {
-            yield StatusUpdate('busy, continuing in ${delta['_wait']}s');
+            yield StatusUpdate('${delta['_why'] ?? 'busy'}, continuing in ${delta['_wait']}s');
             continue;
           }
           final piece = delta['content'];
@@ -230,7 +255,10 @@ class Brain {
           }
           yield ToolStarted(c['name']!, args);
           final result = await tools.run(c['name']!, args, userText, _turn, '$lastReply');
-          yield StepDone(toolStatus(c['name']!, args), _outcome(c['name']!, result));
+          final step = (toolStatus(c['name']!, args), _outcome(c['name']!, result));
+          steps.add(step);
+          if (tools.pc.toolDefs.any((t) => t['function']['name'] == c['name'])) usedPc = true;
+          yield StepDone(step.$1, step.$2);
           final text = jsonEncode(result);
           convo.add({
             'role': 'tool',
@@ -244,6 +272,10 @@ class Brain {
         yield TextDelta(finalText);
       }
     } finally {
+      _lastTurnUsedPc = usedPc;
+      if (finalText.trim().isNotEmpty) {
+        Store.instance.logExchange(userText, finalText.replaceAll(fence, '[code]').trim(), steps);
+      }
       // close the turn even if interrupted, so it isn't acted on again next time
       _history.add({
         'role': 'assistant',
@@ -271,7 +303,8 @@ class Brain {
   /// Tries each model; when all are rate limited, waits (up to 45 s) for the first to free up.
   Stream<Map<String, dynamic>> _streamWithFallback(List<Map<String, dynamic>> msgs, bool useTools) async* {
     final models = [cfg.groqModel, if (cfg.fallbackModel != cfg.groqModel) cfg.fallbackModel];
-    for (var round = 0; round < 4; round++) {
+    var networkFailures = 0;
+    for (var round = 0; round < 6; round++) {
       for (final model in models) {
         if ((_freeAt[model] ?? DateTime(2000)).isAfter(DateTime.now())) continue;
         var started = false;
@@ -284,6 +317,16 @@ class Brain {
         } on _Retryable catch (e) {
           if (started) rethrow;
           _freeAt[model] = DateTime.now().add(e.wait);
+        } on Exception catch (e) {
+          // slow or dropped connection: wait a little and try again
+          if (started || !_isNetworkError(e)) rethrow;
+          networkFailures++;
+          if (networkFailures >= 3) {
+            throw AnviError('The internet is slow right now and I couldn\'t reach the AI. Please try again.');
+          }
+          yield {'_wait': 2 * networkFailures, '_why': 'reconnecting'};
+          await Future.delayed(Duration(seconds: 2 * networkFailures));
+          break; // retry from the first available model
         }
       }
       final soonest = models.map((m) => _freeAt[m] ?? DateTime.now()).reduce((a, b) => a.isBefore(b) ? a : b);
@@ -296,6 +339,9 @@ class Brain {
     }
     throw AnviError("I've hit the free Groq limit for now. Give me a minute and ask again.");
   }
+
+  static bool _isNetworkError(Object e) =>
+      e is TimeoutException || e is SocketException || e is HandshakeException || e is http.ClientException;
 
   static Duration _retryAfter(http.StreamedResponse response, String body) {
     final header = double.tryParse(response.headers['retry-after'] ?? '');
@@ -320,7 +366,7 @@ class Brain {
         if (useTools) 'tools': _tools,
         if (useTools) 'tool_choice': 'auto',
       });
-    final response = await client.send(request).timeout(const Duration(seconds: 30));
+    final response = await client.send(request).timeout(const Duration(seconds: 45));
     if (response.statusCode != 200) {
       final body = await response.stream.bytesToString();
       if (response.statusCode == 429) throw _Retryable('429', _retryAfter(response, body));

@@ -1,4 +1,6 @@
 import 'package:anvi/assistant.dart';
+import 'package:anvi/store.dart';
+import 'package:anvi/voice.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -9,6 +11,23 @@ void main() {
     expect(isSleepCommand('By Karen.'), isTrue);
     expect(isSleepCommand('Karen, run a speed test'), isFalse);
     expect(afterWakeWord('Hey, Karen. What is the time?'), 'What is the time?');
+  });
+
+  test('custom wake word from settings', () {
+    Store.instance.setWakeWord('Jarvis');
+    expect(hasWakeWord('Hey Jarvis, what time is it'), isTrue);
+    expect(hasWakeWord('Karen'), isFalse);
+    expect(isSleepCommand('bye Jarvis'), isTrue);
+    expect(afterWakeWord('Jarvis, open Instagram please'), 'open Instagram please');
+    Store.instance.setWakeWord('Karen');
+    expect(hasWakeWord('Karan'), isTrue);
+  });
+
+  test('Telugu and Hindi replies are detected for the right voice', () {
+    expect(Deepgram.indicLanguage('ఈ రోజు వాతావరణం బాగుంది'), 'te-IN');
+    expect(Deepgram.indicLanguage('आज मौसम अच्छा है'), 'hi-IN');
+    expect(Deepgram.indicLanguage('The weather is nice'), '');
+    expect(Deepgram.cleanForSpeech('ఉష్ణోగ్రత 30°C'), contains('డిగ్రీలు'));
   });
 
   test('code blocks are split from spoken text', () {

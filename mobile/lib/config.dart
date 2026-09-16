@@ -8,6 +8,7 @@ class AnviConfig {
   String groqKey = '';
   String deepgramKey = '';
   String tavilyKey = '';
+  String sarvamKey = ''; // Telugu/Hindi voice (optional)
 
   /// Pairing secret + addresses of Karen on the PC, used for PC actions.
   String pairToken = '';
@@ -23,7 +24,7 @@ class AnviConfig {
   bool get ready => groqKey.isNotEmpty && deepgramKey.isNotEmpty;
   bool get hasPc => pairToken.isNotEmpty && (lanUrl.isNotEmpty || publicUrl.isNotEmpty);
 
-  static const _fields = ['groqKey', 'deepgramKey', 'tavilyKey', 'pairToken', 'lanUrl', 'publicUrl'];
+  static const _fields = ['groqKey', 'deepgramKey', 'tavilyKey', 'sarvamKey', 'pairToken', 'lanUrl', 'publicUrl'];
 
   static Future<AnviConfig> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -48,6 +49,7 @@ class AnviConfig {
       groqKey = '${data['groq'] ?? ''}'.trim();
       deepgramKey = '${data['deepgram'] ?? ''}'.trim();
       tavilyKey = '${data['tavily'] ?? ''}'.trim();
+      sarvamKey = '${data['sarvam'] ?? ''}'.trim();
       pairToken = '${data['token'] ?? ''}'.trim();
       lanUrl = _trimUrl('${data['lan'] ?? ''}');
       publicUrl = _trimUrl('${data['public'] ?? ''}');
@@ -63,6 +65,7 @@ class AnviConfig {
         'groqKey': groqKey,
         'deepgramKey': deepgramKey,
         'tavilyKey': tavilyKey,
+        'sarvamKey': sarvamKey,
         'pairToken': pairToken,
         'lanUrl': lanUrl,
         'publicUrl': publicUrl,
@@ -72,6 +75,7 @@ class AnviConfig {
     groqKey = v['groqKey']!;
     deepgramKey = v['deepgramKey']!;
     tavilyKey = v['tavilyKey']!;
+    sarvamKey = v['sarvamKey']!;
     pairToken = v['pairToken']!;
     lanUrl = v['lanUrl']!;
     publicUrl = v['publicUrl']!;

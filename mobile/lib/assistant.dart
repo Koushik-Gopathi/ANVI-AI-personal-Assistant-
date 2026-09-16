@@ -9,6 +9,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'brain.dart';
 import 'config.dart';
 import 'orb.dart';
+import 'store.dart';
 import 'tools.dart';
 import 'voice.dart';
 
@@ -20,7 +21,20 @@ class CodeBlock {
 }
 
 // "Karen" as speech-to-text may spell it (Karen, Caren, Karan, Karin, Keren...)
-final _wakeRe = RegExp(r'\b[kc](?:a|e|ae|ai)r+(?:e|a|i|y)n+\b', caseSensitive: false);
+final _karenRe = RegExp(r'\b[kc](?:a|e|ae|ai)r+(?:e|a|i|y)n+\b', caseSensitive: false);
+RegExp? _customRe;
+String _customFor = '';
+
+/// Matches the wake word chosen in settings (fuzzy for "Karen").
+RegExp get _wakeRe {
+  final word = Store.instance.wakeWord.toLowerCase().replaceAll(RegExp(r'[^a-z\s]'), ' ').trim();
+  if (word.isEmpty || word == 'karen') return _karenRe;
+  if (word != _customFor) {
+    _customFor = word;
+    _customRe = RegExp('\\b${word.split(RegExp(r'\s+')).map(RegExp.escape).join(r'\s*')}\\b', caseSensitive: false);
+  }
+  return _customRe!;
+}
 const _sleepWords = {
   'hey', 'hi', 'ok', 'okay', 'go', 'to', 'sleep', 'bye', 'by', 'goodbye', 'good', 'night', 'stop', 'thanks', 'thank',
   'you', 'that', 's', 'all', 'please', 'now', 'shut', 'down', 'standby', 'pause', 'the', 'a'
@@ -75,12 +89,13 @@ class Assistant extends ChangeNotifier {
     player.onStart = () {
       if (mode == OrbMode.thinking) _setMode(OrbMode.speaking);
     };
+    player.onProblem = _showError;
   }
 
   String get status {
     if (error != null) return error!;
     return switch (mode) {
-      OrbMode.sleep => passive ? 'say “Karen” to wake' : 'tap to wake',
+      OrbMode.sleep => passive ? 'say “${Store.instance.wakeWord}” to wake' : 'tap to wake',
       OrbMode.listening => 'listening...',
       OrbMode.thinking => detail.isNotEmpty ? '${detail.replaceAll(RegExp(r'\.+$'), '')}...' : 'thinking...',
       OrbMode.speaking => 'speaking...',
@@ -89,7 +104,7 @@ class Assistant extends ChangeNotifier {
 
   String get hint => switch (mode) {
         OrbMode.sleep => passive ? 'or tap the orb' : 'tap the orb',
-        OrbMode.listening => 'speak naturally · say “Karen” to sleep',
+        OrbMode.listening => 'speak naturally · say “${Store.instance.wakeWord}” to sleep',
         OrbMode.thinking => 'tap to cancel',
         OrbMode.speaking => 'tap to interrupt',
       };
@@ -117,7 +132,7 @@ class Assistant extends ChangeNotifier {
     mic.asleep = true;
     mic.onUtterance = _onWakeCandidate;
     passive = await mic.start();
-    if (!passive) _showError('Karen needs microphone permission');
+    if (!passive) _showError('${Store.instance.wakeWord} needs microphone permission');
     notifyListeners();
   }
 
@@ -125,7 +140,7 @@ class Assistant extends ChangeNotifier {
     if (awake || _checkingWake) return;
     _checkingWake = true;
     try {
-      final text = await deepgram.transcribe(wav);
+      final text = await deepgram.transcribe(wav, wake: true);
       if (!awake && hasWakeWord(text) && !(isSleepCommand(text) && afterWakeWord(text).isNotEmpty)) {
         await wakeUp(afterWakeWord(text));
       }
@@ -189,7 +204,7 @@ class Assistant extends ChangeNotifier {
     mic.asleep = false;
     mic.onUtterance = _onUtterance;
     if (!await mic.start()) {
-      _showError('Karen needs microphone permission');
+      _showError('${Store.instance.wakeWord} needs microphone permission');
       await goToSleep();
     }
   }
@@ -217,14 +232,20 @@ class Assistant extends ChangeNotifier {
   }
 
   // --- a conversation turn ----------------------------------------------------
-  final _clips = <Future<Uint8List?>>[];
+  final _clips = <Future<Object?>>[];
   int _released = 0;
   bool _release = false, _muted = false, _filled = false;
   Future<void> _pump = Future.value();
 
   void _queueSpeech(String sentence, [Future<Uint8List> Function(String)? synth]) {
-    if (_muted || !RegExp(r'\w').hasMatch(sentence)) return;
-    _clips.add((synth ?? deepgram.speak)(sentence.trim()).then<Uint8List?>((b) => b).catchError((_) => null));
+    if (_muted || !Store.instance.speakReplies || !RegExp(r'[\w\u0900-\u097F\u0C00-\u0C7F]').hasMatch(sentence)) return;
+    final text = sentence.trim();
+    final lang = Deepgram.indicLanguage(text);
+    if (lang.isNotEmpty && cfg.sarvamKey.isEmpty) {
+      _clips.add(Future<Object?>.value(SayText(Deepgram.cleanForSpeech(text), lang)));
+    } else {
+      _clips.add((synth ?? deepgram.speak)(text).then<Object?>((b) => b).catchError((_) => null));
+    }
     _drain();
   }
 
@@ -234,8 +255,8 @@ class Assistant extends ChangeNotifier {
     while (_released < _clips.length) {
       final clip = _clips[_released++];
       _pump = _pump.then((_) async {
-        final bytes = await clip;
-        if (bytes != null && gen == _gen && !_muted) player.add(bytes);
+        final item = await clip;
+        if (item != null && gen == _gen && !_muted) player.add(item);
       });
     }
   }
@@ -307,7 +328,7 @@ class Assistant extends ChangeNotifier {
             notifyListeners();
           case ToolStarted(:final name, :final args):
             detail = toolStatus(name, args);
-            if (!_filled && _clips.isEmpty && buffer.trim().isEmpty) {
+            if (!_filled && _clips.isEmpty && buffer.trim().isEmpty && Store.instance.language == 'english') {
               final filler = switch (name) {
                 'web_search' || 'get_news' => _fillers[Random().nextInt(_fillers.length)],
                 'speed_test' => 'Running a speed test, this takes about 15 seconds.',
@@ -364,6 +385,7 @@ class Assistant extends ChangeNotifier {
 
   // --- app lifecycle ------------------------------------------------------------
   Future<void> pause() async {
+    if (Store.instance.backgroundListening) return; // the foreground service keeps the mic alive
     paused = true;
     _gen++;
     await player.stop();
@@ -373,6 +395,7 @@ class Assistant extends ChangeNotifier {
   }
 
   Future<void> resume() async {
+    if (!paused) return;
     paused = false;
     await _afterTurn();
   }

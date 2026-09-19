@@ -34,6 +34,7 @@
     <footer class="status-wrap">
       <div class="status" id="status">tap to wake</div>
       <div class="hint" id="hint">click the orb or press space</div>
+      <div class="suggest" id="suggest"></div>
     </footer>
   </div>
 
@@ -122,6 +123,8 @@
           <small id="langNote"></small>
         </label>
         <label class="check"><input type="checkbox" id="setSpeak" /> Speak replies out loud</label>
+        <label class="check"><input type="checkbox" id="setBargeIn" /> Stop talking when I start speaking</label>
+        <label class="check"><input type="checkbox" id="setSounds" /> Sounds (wake, working, done, error)</label>
         <div class="row">
           <button type="submit" class="primary">Save</button>
           <span id="settingsSaved" class="saved" hidden>Saved ✓</span>
@@ -141,7 +144,28 @@
     </div>
   </div>
 
+  <div class="modal" id="diagModal" hidden>
+    <div class="modal-card panel-card wide" role="dialog" aria-labelledby="diagTitle">
+      <button class="modal-close" data-close aria-label="Close">✕</button>
+      <h2 id="diagTitle">Diagnostics</h2>
+      <p class="modal-note">Speak and watch the microphone bar. If it doesn't move, Karen can't hear you.</p>
+      <div class="diag-live">
+        <div class="meter"><span>Microphone</span><div class="bar"><i id="diagMic"></i></div></div>
+        <div class="meter"><span>Karen's voice</span><div class="bar"><i id="diagOut"></i></div></div>
+      </div>
+      <dl class="diag-grid" id="diagLive"></dl>
+      <div class="row">
+        <button class="primary" id="diagVoice">Test voice</button>
+        <button class="primary" id="diagRun">Check services again</button>
+        <span id="diagVoiceNote" class="saved"></span>
+      </div>
+      <h3>Services</h3>
+      <ul class="diag-checks" id="diagChecks"><li class="empty">Checking…</li></ul>
+    </div>
+  </div>
+
   <div class="corner-row">
+    <button class="corner" id="diagBtn" title="Diagnostics (D)" aria-label="Diagnostics">🩺</button>
     <button class="corner" id="historyBtn" title="History (H)" aria-label="History">🕘</button>
     <button class="corner" id="settingsBtn" title="Settings" aria-label="Settings">⚙</button>
     <button class="corner" id="phoneBtn" title="Use Karen on your phone" aria-label="Use Karen on your phone" hidden>📱</button>

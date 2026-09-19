@@ -9,6 +9,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'config.dart';
 import 'phone_skills.dart';
+import 'vision.dart';
 
 const _browserUa =
     'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36';
@@ -56,6 +57,19 @@ final phoneTools = [
   _tool('set_timer', 'Start a countdown timer on the phone.',
       {'seconds': {'type': 'integer', 'description': 'length in seconds'}, 'label': _str('timer label')}, ['seconds']),
   _tool('navigate_to', 'Open Google Maps directions to a place.', {'place': _str('destination')}, ['place']),
+  _tool(
+      'look_with_camera',
+      "Open the phone camera (or the gallery) so the user takes a photo, then answer a question about it: read a "
+          'bill, notice, label, prescription or handwritten notes, identify an object, solve what is written. Use when '
+          'the user asks you to look at / read / see something. The user taps the shutter.',
+      {
+        'question': _str('what the user wants to know about the photo'),
+        'source': {
+          'type': 'string',
+          'enum': ['camera', 'gallery'],
+          'description': 'gallery when the user means a photo they already have'
+        },
+      }),
   ...PhoneSkills.tools,
 ];
 
@@ -70,6 +84,7 @@ String toolStatus(String name, Map args) => PhoneSkills.names.contains(name) ? P
       'set_alarm' => 'setting alarm',
       'set_timer' => 'starting timer',
       'navigate_to' => 'opening maps',
+      'look_with_camera' => args['source'] == 'gallery' ? 'opening your gallery' : 'opening the camera',
       'run_command' => 'running a command on your PC',
       'open_app' => 'opening ${args['name'] ?? 'app'} on your PC',
       _ => '${name.replaceAll('_', ' ')} on your PC',
@@ -117,6 +132,8 @@ class Tools {
           return await PhoneActions.timer(number('seconds'), arg('label'));
         case 'navigate_to':
           return await PhoneActions.navigate(arg('place'));
+        case 'look_with_camera':
+          return await PhoneVision.look(cfg, client, arg('question'), arg('source'));
         default:
           if (PhoneSkills.names.contains(name)) return await PhoneSkills.run(name, args);
           return await pc.call(name, args, userText, turn, lastReply);

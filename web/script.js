@@ -28,6 +28,13 @@ const IS_TOUCH = matchMedia("(pointer: coarse)").matches;
 let passive = false; // asleep but listening for "Karen"
 
 let wakeName = "Karen";
+const prefs = { barge_in: true, sounds: true };
+let hadExchange = false;
+let suggestEl = null; // set up with the suggestions below
+
+// plain record the diagnostics panel reads (written from everywhere, never drives behaviour)
+const diag = { heard: "", heardAt: 0, sttMs: 0, wakeHeard: "", clipsPlayed: 0, clipsFailed: 0, lastError: "",
+  lastErrorAt: 0, bargeIns: 0, echoesIgnored: 0 };
 
 function STATUS() {
   return {
@@ -54,10 +61,14 @@ function renderStatus() {
   statusEl.textContent = state === "thinking" && statusDetail ? statusDetail.replace(/\.+$/, "") + "..." : s;
   statusEl.className = "status" + (state === "sleep" ? " muted" : "");
   hintEl.textContent = h;
+  renderSuggestion();
 }
 
 function showError(msg) {
   console.error("Karen:", msg);
+  diag.lastError = msg;
+  diag.lastErrorAt = Date.now();
+  sound("error");
   statusEl.textContent = msg.length > 90 ? msg.slice(0, 90) + "…" : msg;
   statusEl.className = "status error";
   clearTimeout(errorTimer);
@@ -100,6 +111,7 @@ let audioCtx = null;
 let micStream = null;
 let micAnalyser = null;
 let outAnalyser = null;
+let outGain = null;
 const levelBuf = new Float32Array(1024);
 
 function ensureAudioCtx() {
@@ -107,7 +119,8 @@ function ensureAudioCtx() {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     outAnalyser = audioCtx.createAnalyser();
     outAnalyser.fftSize = 1024;
-    outAnalyser.connect(audioCtx.destination);
+    outGain = audioCtx.createGain();
+    outAnalyser.connect(outGain).connect(audioCtx.destination);
     const unlock = audioCtx.createBufferSource();
     unlock.buffer = audioCtx.createBuffer(1, 1, 22050);
     unlock.connect(audioCtx.destination);
@@ -115,6 +128,11 @@ function ensureAudioCtx() {
   }
   if (audioCtx.state === "suspended") audioCtx.resume();
   return audioCtx;
+}
+
+function duck(on) {
+  if (!outGain || !audioCtx) return;
+  outGain.gain.setTargetAtTime(on ? 0.3 : 1, audioCtx.currentTime, 0.05);
 }
 
 function rms(analyser) {
@@ -168,11 +186,12 @@ function startRecorder() {
   rec.onstop = () => {
     if (rec.discard) {
       // silence timeout or noise: just start a fresh take
-      const listeningNow = awake ? state === "listening" : state === "sleep" && passive && !wakeChecking;
+      const listeningNow = bargeListening() || (awake ? state === "listening" : state === "sleep" && passive && !wakeChecking);
       if (listeningNow && !recorder && micStream) startRecorder();
       return;
     }
     const blob = new Blob(chunks, { type: rec.mimeType || MIME || "audio/webm" });
+    if (rec.barge) return checkBargeIn(blob);
     if (!awake) return checkWakeWord(blob);
     // phones play audio through the quiet earpiece while the mic is open
     if (IS_TOUCH) closeMic();
@@ -192,28 +211,104 @@ function stopRecorder(discard) {
 }
 
 async function beginListening() {
+  duck(false);
   if (!awake) return setState("sleep");
   setState("listening");
   if (!micStream && !(await openMic())) return goToSleep();
   if (awake && state === "listening" && !recorder) startRecorder();
 }
 
+// Barge-in: while Karen talks the mic keeps listening (desktop only; the browser's echo
+// cancellation removes most of her own voice, and what's left is checked after transcription).
+const bargeListening = () => prefs.barge_in && !IS_TOUCH && state === "speaking" && !!micStream && !bargeChecking;
+let bargeChecking = false;
+
+function startBargeListening() {
+  if (bargeListening() && !recorder) startRecorder();
+}
+
+// "Karen stop", "wait", "ok enough": stop talking, then listen
+const STOP_ONLY = /^\s*(?:(?:hey|ok|okay|no|please|karen)[\s,.!]*)*(?:stop|wait|enough|shut up|be quiet|quiet|cancel|hold on|pause)(?:[\s,.!]*(?:it|that|talking|please|karen))*[\s.!]*$/i;
+
+// the short lines Karen says while working (main.py FILLERS / TOOL_FILLERS)
+const FILLER_LINES = ["one sec let me check", "let me look that up", "give me a second", "checking that for you",
+  "running a speed test this takes about 15 seconds", "on it", "taking a look"];
+
+function isEcho(text) {
+  // words Karen herself is saying, picked up by the mic
+  const words = (t) => t.toLowerCase().match(/[a-z0-9ऀ-ॿఀ-౿]{3,}/g) || [];
+  const heard = words(text);
+  if (!heard.length) return true;
+  const plain = text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+  if (plain && FILLER_LINES.some((line) => line.includes(plain))) return true;
+  const said = new Set(words(replyEl.textContent || ""));
+  const overlap = heard.filter((w) => said.has(w)).length / heard.length;
+  return overlap >= 0.6;
+}
+
+async function checkBargeIn(blob) {
+  bargeChecking = true;
+  const id = turnId;
+  let text = "";
+  try {
+    const form = new FormData();
+    form.append("audio", blob, "speech.webm");
+    form.append("mime_type", blob.type);
+    const res = await fetch("/api/transcribe", { method: "POST", body: form });
+    text = res.ok ? (await res.json()).transcript || "" : "";
+  } catch (_) {}
+  bargeChecking = false;
+  const real = text.trim() && !isEcho(text) && (STOP_ONLY.test(text) || text.trim().split(/\s+/).length >= 2);
+  if (!real) {
+    if (text.trim()) diag.echoesIgnored++;
+    duck(false);
+    if (id === turnId && state === "speaking") startBargeListening();
+    else if (state === "listening" && awake && !recorder && micStream) startRecorder();
+    return;
+  }
+  diag.bargeIns++;
+  diag.heard = text;
+  diag.heardAt = Date.now();
+  cancelTurn();
+  duck(false);
+  if (isSleepCommand(text)) {
+    showYou(text);
+    showReply("");
+    return goToSleep();
+  }
+  if (STOP_ONLY.test(text)) {
+    showYou(text);
+    return awake ? beginListening() : backToSleepListening();
+  }
+  const newId = ++turnId;
+  try {
+    await converse(text, newId);
+  } catch (err) {
+    if (err.name === "AbortError" || newId !== turnId) return;
+    showError(err.message || "connection lost — is main.py running?");
+    awake ? beginListening() : backToSleepListening();
+  }
+}
+
 // runs every 40ms (keeps working when the tab is in the background)
 setInterval(() => {
   const asleepListening = !awake && state === "sleep" && passive;
-  if (!(state === "listening" || asleepListening) || !recorder || !micAnalyser) return;
+  const barging = bargeListening();
+  if (!(state === "listening" || asleepListening || barging) || !recorder || !micAnalyser) return;
   const dt = 40;
   const level = rms(micAnalyser);
   const now = performance.now();
 
   if (!vad.speaking) vad.floor = vad.floor * 0.97 + Math.min(level, vad.floor * 3) * 0.03;
-  const threshold = Math.max(0.012, vad.floor * 3);
+  // over Karen's own voice, only clearly louder, longer speech counts
+  const threshold = barging ? Math.max(0.025, vad.floor * 4) : Math.max(0.012, vad.floor * 3);
 
   if (level > threshold) {
     vad.voicedMs += dt;
     vad.silenceMs = 0;
     if (vad.speaking) vad.totalVoicedMs += dt;
-    if (!vad.speaking && vad.voicedMs >= 160) {
+    if (!vad.speaking && vad.voicedMs >= (barging ? 280 : 160)) {
+      if (barging) duck(true);
       vad.speaking = true;
       vad.startedAt = now;
       vad.totalVoicedMs = vad.voicedMs;
@@ -224,19 +319,25 @@ setInterval(() => {
   }
 
   // asleep: only short phrases can be "Karen ..." (long talk nearby is ignored)
-  const endSilence = asleepListening ? 600 : 900;
-  const maxLength = asleepListening ? 4500 : 25000;
+  const endSilence = asleepListening ? 600 : barging ? 700 : 900;
+  const maxLength = asleepListening ? 4500 : barging ? 10000 : 25000;
   if (vad.speaking && (vad.silenceMs >= endSilence || now - vad.startedAt > maxLength)) {
-    const tooShort = vad.totalVoicedMs < 250; // a click or bump
+    const tooShort = vad.totalVoicedMs < (barging ? 350 : 250); // a click or bump
     const tooLong = asleepListening && now - vad.startedAt > maxLength;
     if (tooShort || tooLong) {
+      if (barging) duck(false);
       stopRecorder(true);
+    } else if (barging) {
+      recorder.barge = true;
+      stopRecorder(false);
     } else {
       if (!asleepListening) setState("thinking");
       stopRecorder(false);
     }
   } else if (!vad.speaking && vad.voicedMs === 0 && now - vad.recStart > (asleepListening ? 3000 : 12000)) {
     stopRecorder(true); // nothing said for a while; restart to keep takes small
+  } else if (barging && !vad.speaking && now - vad.recStart > 6000) {
+    stopRecorder(true);
   }
 }, 40);
 
@@ -252,8 +353,12 @@ async function handleUtterance(blob) {
     const form = new FormData();
     form.append("audio", blob, "speech.webm");
     form.append("mime_type", blob.type);
+    const sttStart = performance.now();
     const res = await fetch("/api/transcribe", { method: "POST", body: form, signal: abortCtl.signal });
     const data = await res.json();
+    diag.sttMs = Math.round(performance.now() - sttStart);
+    diag.heard = data.transcript || "(nothing — noise?)";
+    diag.heardAt = Date.now();
     if (id !== turnId) return;
     if (!res.ok) throw new Error(res.status === 401 ? "this phone isn't paired — scan the QR code on your PC" : data.error || "transcription failed");
 
@@ -290,6 +395,9 @@ async function sendText(text) {
 }
 
 async function converse(text, id) {
+  hadExchange = true;
+  renderSuggestion();
+  duck(false);
   showYou(text);
   showReply("");
   clearSteps();
@@ -324,6 +432,7 @@ async function converse(text, id) {
     else if (ev.t === "step") addStep(ev);
     else if (ev.t === "error") failure = ev.error;
     else if (ev.t === "status") {
+      if (!/reconnecting|busy/.test(ev.text)) sound("tick");
       statusDetail = ev.text;
       if (state === "thinking") renderStatus();
     }
@@ -353,6 +462,7 @@ async function converse(text, id) {
   await queue.finished();
   if (id !== turnId) return;
   currentQueue = null;
+  if (stepsEl.querySelector("li.ok") && !stepsEl.querySelector("li.bad")) sound("done");
   awake ? beginListening() : backToSleepListening();
 }
 
@@ -385,6 +495,7 @@ class SpeechQueue {
       try {
         buffer = await ac.decodeAudioData(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)).buffer);
       } catch (_) {
+        diag.clipsFailed++;
         return;
       }
       if (this.id !== turnId) return;
@@ -396,6 +507,7 @@ class SpeechQueue {
       src.start(startAt);
       this.endAt = startAt + buffer.duration;
       this.scheduled++;
+      diag.clipsPlayed++;
       this.sources.add(src);
       src.onended = () => {
         this.sources.delete(src);
@@ -403,6 +515,7 @@ class SpeechQueue {
         if (!this.sources.size && !this.streamDone && this.id === turnId) setState("thinking");
       };
       if (state !== "speaking") setState("speaking");
+      startBargeListening();
     });
   }
 
@@ -450,6 +563,7 @@ let warnedNoVoice = false;
 
 function cancelTurn() {
   turnId++;
+  duck(false);
   if (abortCtl) abortCtl.abort();
   abortCtl = null;
   if (currentQueue) currentQueue.stop();
@@ -579,6 +693,7 @@ async function checkWakeWord(blob) {
       return showError("this phone isn't paired — scan the QR code on your PC");
     }
     const text = res.ok ? (await res.json()).transcript || "" : "";
+    if (text) diag.wakeHeard = text;
     // "Karen, go to sleep" while already asleep: nothing to do
     if (!awake && state === "sleep" && hasWakeWord(text) && !(isSleepCommand(text) && afterWakeWord(text))) {
       wakeChecking = false;
@@ -611,21 +726,36 @@ function backToSleepListening() {
   startPassive();
 }
 
-function chime(up) {
+// Small synthesised cues: wake, sleep, a tick when a task starts, done, error
+const SOUNDS = {
+  wake: [[620, 980, 0, 0.28, 0.07]],
+  sleep: [[900, 520, 0, 0.28, 0.07]],
+  tick: [[1400, 1400, 0, 0.05, 0.025]],
+  done: [[660, 660, 0, 0.14, 0.05], [990, 990, 0.1, 0.22, 0.05]],
+  error: [[330, 250, 0, 0.3, 0.05]],
+};
+let lastSound = { kind: "", at: 0 };
+
+function sound(kind) {
   const ac = audioCtx;
-  if (!ac || ac.state !== "running") return;
-  const t = ac.currentTime;
-  const osc = ac.createOscillator();
-  const gain = ac.createGain();
-  osc.type = "sine";
-  osc.frequency.setValueAtTime(up ? 620 : 900, t);
-  osc.frequency.exponentialRampToValueAtTime(up ? 980 : 520, t + 0.18);
-  gain.gain.setValueAtTime(0.0001, t);
-  gain.gain.exponentialRampToValueAtTime(0.07, t + 0.03);
-  gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.28);
-  osc.connect(gain).connect(ac.destination);
-  osc.start(t);
-  osc.stop(t + 0.3);
+  if (!prefs.sounds || !ac || ac.state !== "running") return;
+  const now = performance.now();
+  if (lastSound.kind === kind && now - lastSound.at < (kind === "tick" ? 1200 : 2500)) return;
+  lastSound = { kind, at: now };
+  for (const [from, to, delay, length, volume] of SOUNDS[kind]) {
+    const t = ac.currentTime + delay;
+    const osc = ac.createOscillator();
+    const gain = ac.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(from, t);
+    osc.frequency.exponentialRampToValueAtTime(to, t + length * 0.65);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(volume, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + length);
+    osc.connect(gain).connect(ac.destination);
+    osc.start(t);
+    osc.stop(t + length + 0.02);
+  }
 }
 
 let wakeLock = null;
@@ -655,7 +785,7 @@ async function wakeUp(request = "") {
   if (!(await openMic())) return startPassive();
   awake = true;
   keepScreenOn(true);
-  chime(true);
+  sound("wake");
   if (request) return sendText(request); // "Karen, what's the time?"
   setState("listening");
   setTimeout(() => awake && state === "listening" && !recorder && beginListening(), 300); // skip the chime
@@ -667,7 +797,7 @@ function goToSleep() {
   keepScreenOn(false);
   stopRecorder(true);
   setState("sleep");
-  chime(false);
+  sound("sleep");
   startPassive(); // keep listening for "Karen"
 }
 
@@ -776,7 +906,7 @@ composer.addEventListener("submit", (e) => {
 });
 
 window.addEventListener("keydown", (e) => {
-  const openModal = [phoneModal, settingsModal, historyModal].find((m) => !m.hidden);
+  const openModal = [phoneModal, settingsModal, historyModal, diagModal].find((m) => !m.hidden);
   if (openModal) {
     if (e.key === "Escape") openModal.hidden = true;
     return;
@@ -793,6 +923,8 @@ window.addEventListener("keydown", (e) => {
     openComposer();
   } else if (e.key === "h" || e.key === "H") {
     openHistory();
+  } else if (e.key === "d" || e.key === "D") {
+    openDiagnostics();
   } else if (e.key === "c" || e.key === "C") {
     codeIsOpen() ? closeCode() : openCode();
   } else if (e.key === "Escape") {
@@ -821,10 +953,11 @@ if (new URLSearchParams(location.search).get("app") === "desktop") firstInteract
 // ---------------------------------------------------------------------------
 const settingsModal = $("settingsModal");
 const historyModal = $("historyModal");
+const diagModal = $("diagModal");
 let languageNames = {};
 let indianVoice = "device";
 
-for (const modal of [settingsModal, historyModal]) {
+for (const modal of [settingsModal, historyModal, diagModal]) {
   modal.addEventListener("click", (e) => {
     if (e.target === modal || e.target.hasAttribute("data-close")) modal.hidden = true;
   });
@@ -834,6 +967,8 @@ async function loadSettings() {
   const data = await fetch("/api/settings").then((r) => r.json());
   languageNames = data.languages;
   indianVoice = data.indian_voice;
+  prefs.barge_in = data.settings.barge_in !== false;
+  prefs.sounds = data.settings.sounds !== false;
   setWakeWord(data.settings.wake_word);
   return data;
 }
@@ -887,6 +1022,8 @@ async function openSettings() {
     $("setVoice").replaceChildren(...Object.entries(data.voices).map(([k, v]) => option(k, v, s.voice)));
     $("setLanguage").replaceChildren(...Object.entries(data.languages).map(([k, v]) => option(k, v, s.language)));
     $("setSpeak").checked = s.speak_replies;
+    $("setBargeIn").checked = s.barge_in !== false;
+    $("setSounds").checked = s.sounds !== false;
     updateLangNote();
     renderMemory();
   } catch (err) {
@@ -903,12 +1040,16 @@ $("settingsForm").addEventListener("submit", async (e) => {
     voice: $("setVoice").value,
     language: $("setLanguage").value,
     speak_replies: $("setSpeak").checked,
+    barge_in: $("setBargeIn").checked,
+    sounds: $("setSounds").checked,
   };
   const res = await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body) });
   const data = await res.json();
   if (!res.ok) return showError(data.error || "couldn't save settings");
   setWakeWord(data.settings.wake_word);
+  prefs.barge_in = data.settings.barge_in;
+  prefs.sounds = data.settings.sounds;
   $("settingsSaved").hidden = false;
   setTimeout(() => ($("settingsSaved").hidden = true), 2000);
 });
@@ -953,6 +1094,143 @@ $("clearHistory").addEventListener("click", async () => {
   await fetch("/api/history", { method: "DELETE" });
   openHistory();
 });
+
+// ---------------------------------------------------------------------------
+// Diagnostics (D): is she hearing me, is she making sound, are the services up?
+// ---------------------------------------------------------------------------
+let diagTimer = null;
+
+function ago(ms) {
+  if (!ms) return "never";
+  const s = Math.round((Date.now() - ms) / 1000);
+  return s < 60 ? `${s}s ago` : `${Math.round(s / 60)} min ago`;
+}
+
+function renderDiagLive() {
+  if (diagModal.hidden) {
+    clearInterval(diagTimer);
+    diagTimer = null;
+    return;
+  }
+  const mic = micAnalyser ? rms(micAnalyser) : 0;
+  const out = outAnalyser ? rms(outAnalyser) : 0;
+  $("diagMic").style.width = `${Math.min(100, mic * 900)}%`;
+  $("diagOut").style.width = `${Math.min(100, out * 500)}%`;
+  const rows = [
+    ["State", `${state}${awake ? " (awake)" : passive ? " (asleep, listening for “" + wakeName + "”)" : " (asleep, not listening)"}`],
+    ["Microphone", micStream ? "open" : "closed", !micStream && (awake || passive)],
+    ["Audio output", audioCtx ? audioCtx.state : "not started — click the page once", !audioCtx || audioCtx.state !== "running"],
+    ["Voice detected now", vad.speaking ? "yes" : "no"],
+    ["Last heard", diag.heard ? `“${diag.heard}” · ${ago(diag.heardAt)} · ${diag.sttMs} ms` : "nothing yet"],
+    ["Heard while asleep", diag.wakeHeard ? `“${diag.wakeHeard}”` : "nothing yet"],
+    ["Voice clips", `${diag.clipsPlayed} played${diag.clipsFailed ? `, ${diag.clipsFailed} failed` : ""}`, diag.clipsFailed > 0],
+    ["Interrupt by talking", prefs.barge_in ? `on · ${diag.bargeIns} interruptions, ${diag.echoesIgnored} echoes ignored` : "off"],
+    ["Last error", diag.lastError ? `${diag.lastError} · ${ago(diag.lastErrorAt)}` : "none", !!diag.lastError],
+  ];
+  $("diagLive").replaceChildren(...rows.flatMap(([k, v, bad]) => {
+    const dt = document.createElement("dt");
+    dt.textContent = k;
+    const dd = document.createElement("dd");
+    dd.textContent = v;
+    if (bad) dd.className = "bad";
+    return [dt, dd];
+  }));
+}
+
+async function runDiagChecks() {
+  const list = $("diagChecks");
+  list.innerHTML = '<li class="empty">Checking…</li>';
+  try {
+    const data = await fetch("/api/diagnostics").then((r) => r.json());
+    list.replaceChildren(...data.checks.map((c) => {
+      const li = document.createElement("li");
+      if (!c.ok) li.className = "bad";
+      const mark = document.createElement("b");
+      mark.textContent = c.ok ? "✓" : "✕";
+      const small = document.createElement("small");
+      small.textContent = ` — ${c.detail}${c.ms != null ? ` (${c.ms} ms)` : ""}`;
+      li.append(mark, c.name, small);
+      return li;
+    }), Object.assign(document.createElement("li"), {
+      innerHTML: "<b>·</b>",
+      title: "models",
+    }));
+    list.lastChild.append(`Models: ${data.models.chat} · vision ${data.models.vision} · hearing ${data.models.hearing}`);
+  } catch (_) {
+    list.innerHTML = '<li class="bad"><b>✕</b>Karen\'s backend isn\'t answering — is it running?</li>';
+  }
+}
+
+async function openDiagnostics() {
+  diagModal.hidden = false;
+  ensureAudioCtx();
+  renderDiagLive();
+  diagTimer = diagTimer || setInterval(renderDiagLive, 150);
+  runDiagChecks();
+}
+
+$("diagRun").addEventListener("click", runDiagChecks);
+$("diagVoice").addEventListener("click", async () => {
+  const note = $("diagVoiceNote");
+  note.textContent = "…";
+  try {
+    const data = await fetch("/api/voice-test", { method: "POST" }).then((r) => r.json());
+    if (data.error) throw new Error(data.error);
+    const ac = ensureAudioCtx();
+    await ac.resume();
+    if (typeof data.clip !== "string") {
+      note.textContent = "this language uses the computer's own voice";
+      return;
+    }
+    const buffer = await ac.decodeAudioData(Uint8Array.from(atob(data.clip), (c) => c.charCodeAt(0)).buffer);
+    const src = ac.createBufferSource();
+    src.buffer = buffer;
+    src.connect(outAnalyser);
+    src.start();
+    note.textContent = "playing — did you hear it? If not, check the volume and output device.";
+  } catch (err) {
+    note.textContent = "";
+    showError("voice test failed: " + err.message);
+  }
+});
+$("diagBtn").addEventListener("click", openDiagnostics);
+
+// ---------------------------------------------------------------------------
+// Suggestions: what you can ask, shown while idle until the first exchange
+// ---------------------------------------------------------------------------
+const SUGGESTIONS = [
+  "“what's the gold rate in Hyderabad today?”",
+  "“summarise the PDF in my Downloads”",
+  "“look at my screen and explain this error”",
+  "“open YouTube in Chrome and play lo-fi music”",
+  "“remind me in 20 minutes to drink water”",
+  "“make a Word document with notes on neural networks”",
+  "“organise my Downloads folder”",
+  "“remember my exam is on 3rd October”",
+  "“good morning” — weather, news and your reminders",
+  "“run a speed test”",
+  "“close the frozen app”",
+  "“what's using the most RAM?”",
+];
+let suggestionIndex = Math.floor(Math.random() * SUGGESTIONS.length);
+suggestEl = $("suggest");
+
+function renderSuggestion() {
+  if (!suggestEl) return;
+  const idle = !hadExchange && !errorTimer && (state === "listening" || (state === "sleep" && passive));
+  suggestEl.classList.toggle("show", idle);
+}
+
+setInterval(() => {
+  if (hadExchange) return renderSuggestion();
+  suggestEl.classList.remove("show");
+  setTimeout(() => {
+    suggestionIndex = (suggestionIndex + 1) % SUGGESTIONS.length;
+    suggestEl.textContent = "try: " + SUGGESTIONS[suggestionIndex];
+    renderSuggestion();
+  }, 650);
+}, 7000);
+suggestEl.textContent = "try: " + SUGGESTIONS[suggestionIndex];
 
 $("settingsBtn").addEventListener("click", openSettings);
 $("historyBtn").addEventListener("click", openHistory);

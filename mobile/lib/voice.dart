@@ -10,6 +10,7 @@ import 'package:http/http.dart' as http;
 import 'package:record/record.dart';
 
 import 'config.dart';
+import 'diag.dart';
 import 'store.dart';
 
 class AnviError implements Exception {
@@ -45,6 +46,19 @@ class Deepgram {
 
   /// English (and the wake word) via Deepgram; Telugu/Hindi/any language via Groq Whisper.
   Future<String> transcribe(Uint8List wav, {bool wake = false}) async {
+    final watch = Stopwatch()..start();
+    final text = await _transcribe(wav, wake: wake);
+    if (wake) {
+      if (text.isNotEmpty) Diag.wakeHeard = text;
+    } else {
+      Diag.sttMs = watch.elapsedMilliseconds;
+      Diag.heard = text.isEmpty ? '(nothing — noise?)' : text;
+      Diag.heardAt = DateTime.now();
+    }
+    return text;
+  }
+
+  Future<String> _transcribe(Uint8List wav, {bool wake = false}) async {
     final store = Store.instance;
     if (!wake && store.language != 'english') {
       final r = await _withRetry(() async {
@@ -140,7 +154,12 @@ class MicListener {
 
   /// Asleep: only short phrases matter ("Karen ..."), so takes are cut short.
   bool asleep = false;
+
+  /// Karen is talking: only clearly louder, longer speech counts (she may hear herself).
+  bool strict = false;
   void Function(Uint8List wav)? onUtterance;
+  void Function()? onSpeechStart;
+  void Function()? onFalseStart;
   double level = 0;
 
   final _chunks = <Uint8List>[];
@@ -208,12 +227,13 @@ class MicListener {
       _floor = _floor * 0.97 + min(rms, _floor * 3) * 0.03;
     }
 
-    final threshold = max(0.012, _floor * 3);
+    final threshold = strict ? max(0.03, _floor * 4) : max(0.012, _floor * 3);
     if (rms > threshold) {
       _voicedMs += dt;
       _silenceMs = 0;
       if (_speaking) _totalVoicedMs += dt;
-      if (!_speaking && _voicedMs >= 160) {
+      if (!_speaking && _voicedMs >= (strict ? 280 : 160)) {
+        onSpeechStart?.call();
         _speaking = true;
         _totalVoicedMs = _voicedMs;
       }
@@ -223,10 +243,10 @@ class MicListener {
     }
     if (_speaking) _speechMs += dt;
 
-    final endSilence = asleep ? 600 : 900;
-    final maxLength = asleep ? 4500 : 25000;
+    final endSilence = asleep ? 600 : (strict ? 700 : 900);
+    final maxLength = asleep ? 4500 : (strict ? 10000 : 25000);
     if (_speaking && (_silenceMs >= endSilence || _speechMs > maxLength)) {
-      final tooShort = _totalVoicedMs < 250;
+      final tooShort = _totalVoicedMs < (strict ? 350 : 250);
       final tooLong = asleep && _speechMs > maxLength;
       final pcm = Uint8List(_bytes);
       var offset = 0;
@@ -235,7 +255,11 @@ class MicListener {
         offset += c.length;
       }
       _reset();
-      if (!tooShort && !tooLong) onUtterance?.call(_wav(pcm));
+      if (!tooShort && !tooLong) {
+        onUtterance?.call(_wav(pcm));
+      } else {
+        onFalseStart?.call();
+      }
     }
   }
 
@@ -292,6 +316,9 @@ class SpeechPlayer {
     _tts.awaitSpeakCompletion(true);
   }
 
+  /// Quieter while checking whether the user is talking over Karen.
+  void duck(bool on) => _player.setVolume(on ? 0.3 : 1.0).catchError((_) {});
+
   void add(Object clip) {
     _queue.add(clip);
     if (!playing) _next();
@@ -321,7 +348,9 @@ class SpeechPlayer {
     }
     try {
       await _player.play(BytesSource(item as Uint8List, mimeType: 'audio/mpeg'));
+      Diag.clipsPlayed++;
     } catch (_) {
+      Diag.clipsFailed++;
       _next();
     }
   }
@@ -335,6 +364,7 @@ class SpeechPlayer {
   Future<void> stop() async {
     _queue.clear();
     await _player.stop();
+    duck(false);
     await _tts.stop();
     playing = false;
     _idle?.complete();

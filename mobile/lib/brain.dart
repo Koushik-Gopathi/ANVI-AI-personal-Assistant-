@@ -166,8 +166,20 @@ class Brain {
   }
 
   /// One conversation turn: streams text, tool, step and status events.
+  _TurnState? _openTurn;
+
   Stream<BrainEvent> ask(String userText) async* {
     _turn++;
+    // the user spoke over the previous answer, which may still be finishing: close it off first,
+    // so this question isn't mixed up with the old one
+    final previous = _openTurn;
+    if (previous != null && !previous.closed) {
+      previous
+        ..closed = true
+        ..cancelled = true;
+      _history.add({'role': 'assistant', 'content': "[the user interrupted this answer; don't continue it unless asked]"});
+    }
+    final me = _openTurn = _TurnState();
     _usePc = cfg.hasPc && (_pcRequest.hasMatch(userText) || (_lastTurnUsedPc && _shortReply.hasMatch(userText)));
     if (_usePc) await tools.pc.refreshToolDefs();
     final steps = <(String, String)>[];
@@ -189,6 +201,7 @@ class Brain {
         var content = '';
         final hold = wantsAction && executed.isEmpty && !nudged;
         await for (final delta in _streamWithFallback(convo, step < _maxSteps - 1 && !noTools)) {
+          if (me.cancelled) return;
           if (delta.containsKey('_wait')) {
             yield StatusUpdate('${delta['_why'] ?? 'busy'}, continuing in ${delta['_wait']}s');
             continue;
@@ -253,6 +266,7 @@ class Brain {
           } catch (_) {
             args = {};
           }
+          if (me.cancelled) return; // interrupted: don't start more actions
           yield ToolStarted(c['name']!, args);
           final result = await tools.run(c['name']!, args, userText, _turn, '$lastReply');
           final step = (toolStatus(c['name']!, args), _outcome(c['name']!, result));
@@ -273,16 +287,19 @@ class Brain {
       }
     } finally {
       _lastTurnUsedPc = usedPc;
-      if (finalText.trim().isNotEmpty) {
+      if (finalText.trim().isNotEmpty && !me.cancelled) {
         Store.instance.logExchange(userText, finalText.replaceAll(fence, '[code]').trim(), steps);
       }
       // close the turn even if interrupted, so it isn't acted on again next time
-      _history.add({
-        'role': 'assistant',
-        'content': finalText.trim().isEmpty
-            ? '[interrupted before replying; do not act on that request again unless asked]'
-            : finalText,
-      });
+      if (!me.closed) {
+        _history.add({
+          'role': 'assistant',
+          'content': finalText.trim().isEmpty
+              ? '[interrupted before replying; do not act on that request again unless asked]'
+              : finalText,
+        });
+      }
+      me.closed = true;
       while (_history.length > _maxHistory) {
         _history.removeAt(0);
       }
@@ -386,4 +403,9 @@ class Brain {
       if (choices.isNotEmpty) yield Map<String, dynamic>.from(choices.first['delta'] ?? {});
     }
   }
+}
+
+class _TurnState {
+  bool closed = false;
+  bool cancelled = false;
 }

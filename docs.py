@@ -84,6 +84,10 @@ def read_document(path: str, start: int = 0) -> dict:
     p = resolve(path)
     if not p.is_file():
         return {"error": f"no file at {p}"}
+    import vision
+
+    if vision.is_image(p.name):
+        return vision.describe_image(str(p), "Describe this image and read out all the text in it.")
     try:
         text, info = extract_text(p)
     except ValueError as e:

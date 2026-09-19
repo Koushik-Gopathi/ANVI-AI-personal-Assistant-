@@ -15,6 +15,8 @@ class Store {
   String language = 'english'; // english | telugu | hindi | auto
   bool speakReplies = true;
   bool backgroundListening = false;
+  bool bargeIn = true; // talking while Karen speaks interrupts her
+  bool sounds = true;
 
   static const voices = {
     'aura-asteria-en': 'Asteria (US, female)',
@@ -50,6 +52,8 @@ class Store {
       language = languages.containsKey(s['language']) ? s['language'] : language;
       speakReplies = s['speak_replies'] ?? speakReplies;
       backgroundListening = s['background_listening'] ?? backgroundListening;
+      bargeIn = s['barge_in'] ?? bargeIn;
+      sounds = s['sounds'] ?? sounds;
       memories.addAll((data['memories'] as List? ?? []).map((m) => Map<String, dynamic>.from(m)));
       history.addAll((data['history'] as List? ?? []).map((m) => Map<String, dynamic>.from(m)));
     } catch (_) {
@@ -68,6 +72,8 @@ class Store {
         'language': language,
         'speak_replies': speakReplies,
         'background_listening': backgroundListening,
+        'barge_in': bargeIn,
+        'sounds': sounds,
       },
       'memories': memories,
       'history': history.length > 300 ? history.sublist(history.length - 300) : history,

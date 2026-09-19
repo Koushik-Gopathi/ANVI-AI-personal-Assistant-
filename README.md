@@ -45,6 +45,8 @@ Everything happens **on the phone** unless you mention your laptop ("open WhatsA
 - **Say "Karen"** again (or "bye Karen", "Karen go to sleep") — go back to sleep.
 - **Click while she talks** — interrupt.
 - **T** or the ⌨ button — type instead of speaking.
+- **Talk over her** — she stops and listens (or say "stop"). Turn off in Settings if she interrupts herself.
+- **D** or 🩺 — diagnostics: live mic level, what she last heard, voice test, and a check of Groq, Deepgram and the phone connection.
 - **C** — show/hide the code panel · **Esc** — close panel / sleep.
 
 While a task runs, the steps she takes appear above the reply (✓ done, ? waiting for your OK, ✕ failed).
@@ -68,6 +70,8 @@ While a task runs, the steps she takes appear above the reply (✓ done, ? waiti
 | "Make a Word document on my desktop with notes on transformers", "…as a PDF" | Creates .docx / .pdf files (asks first) |
 | "Organise my Downloads folder" | Sorts files into Documents, Images, Videos… subfolders (asks first) |
 | "Open YouTube in Chrome", "close Notepad", "force close the frozen app" | Browser of your choice; closes or kills apps (asks first) |
+| "Look at my screen and explain this error", "read the bill in Downloads/bill.jpg" | Looks at the screen or an image with a vision model (`qwen/qwen3.8-27b` on Groq) |
+| On the phone: "look at this and tell me the amount", "read this notice" | Opens the camera, you take the photo, she reads it |
 | "Remember my bike service is on Friday", "what do you remember?", "good morning" | Long-term memory; daily briefing with weather, news and reminders |
 | On the phone: "WhatsApp Rahul I'm running late", "call Amma", "set an alarm for 6:30", "navigate to Charminar" | Finds the contact, prepares the message (you tap send), sets alarms/timers, opens Maps |
 | On the phone: "open Instagram", "read my WhatsApp notifications", "turn on the flashlight", "volume 40", "battery?", "open Bluetooth settings" | Phone apps, notifications, flashlight, volume, battery, settings pages |
@@ -112,6 +116,7 @@ net.py           shared HTTP session (Windows certificate store)
 phone.py         phone access: LAN HTTPS certificate, QR pairing secret
 desktop.py       Windows desktop app: window, microphone permission, hotkey
 docs.py          read Word/PDF/PowerPoint, create .docx/.pdf, organise folders
+vision.py        screen and image questions (Groq vision model)
 store.py         settings, long-term memory, chat history (%LOCALAPPDATA%\Karen)
 mobile/          Flutter Android app (own agent brain + phone actions + PC tools via /api/tool)
 web/             UI: wake word, voice activity detection, streamed playback, step list, code panel, orb

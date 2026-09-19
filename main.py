@@ -39,6 +39,7 @@ import pc  # noqa: E402
 import phone  # noqa: E402
 import search  # noqa: E402
 import store  # noqa: E402
+import vision  # noqa: E402
 import weather  # noqa: E402
 from net import friendly_error, http  # noqa: E402
 
@@ -213,6 +214,11 @@ TOOLS = [
     _tool("read_document", "Read the text of a Word (.docx), PDF, PowerPoint (.pptx) or text file, e.g. to "
           "summarise it or answer questions. Long files come in parts: call again with next_start.",
           {"path": PATH, "start": _num("character offset from a previous call's next_start")}, ("path",)),
+    _tool("look_at_screen", "Look at the PC screen right now and answer a question about it (read an error, "
+          "describe a page, check what's open). Only when the user asks you to look at / read the screen.",
+          {"question": _str("what the user wants to know about the screen")}),
+    _tool("describe_image", "Look at an image file (photo, screenshot, scanned page) and answer a question about it.",
+          {"path": PATH, "question": _str("what the user wants to know")}, ("path",)),
     _tool("create_document", "Create a real Word (.docx) or PDF document. Write content in simple markdown: "
           "# heading, ## subheading, - bullet, 1. numbered, **bold**, blank line between paragraphs.",
           {"path": _str("file path ending in .docx or .pdf"), "title": _str("document title"),
@@ -297,7 +303,8 @@ TOOL_FUNCS = {
     "lock_pc": pc.lock_pc, "power_action": power_action,
     "read_document": docs.read_document, "create_document": docs.create_document,
     "organize_folder": docs.organize_folder, "remember": store.remember, "forget": store.forget,
-    "daily_briefing": daily_briefing,
+    "daily_briefing": daily_briefing, "look_at_screen": vision.look_at_screen,
+    "describe_image": vision.describe_image,
 }
 TOOL_PARAMS = {t["function"]["name"]: set(t["function"]["parameters"]["properties"]) for t in TOOLS}
 # tools that return {"needs_confirmation"} until called again after the user says yes
@@ -320,6 +327,8 @@ TOOL_STATUS = {
     "remember": lambda a: "remembering that",
     "forget": lambda a: "forgetting that",
     "daily_briefing": lambda a: "getting your briefing",
+    "look_at_screen": lambda a: "looking at your screen",
+    "describe_image": lambda a: f"looking at {Path(str(a.get('path', 'image'))).name}",
     "speed_test": lambda a: "running a speed test",
     "system_info": lambda a: "checking your PC",
     "run_command": lambda a: f"running: {_short(a.get('command', ''), 40)}",
@@ -349,6 +358,8 @@ _pending: dict[tuple[str, str, str], dict] = {}
 EXPLICIT_ONLY = {
     "take_screenshot": re.compile(r"screen\s*shot|screen\s*grab|snap\s*shot|\bss\b|capture (the |my )?screen|print\s*screen", re.I),
     "lock_pc": re.compile(r"\block", re.I),
+    "look_at_screen": re.compile(r"screen|\blook|\bsee\b|\bshowing\b|\bmonitor\b|\bdisplay\b|what'?s (open|this)"
+                                 r"|read (this|that|the)", re.I),
     "close_app": re.compile(r"\b(close|quit|exit|kill|stop|end|terminate)\b", re.I),
 }
 
@@ -634,11 +645,24 @@ def _call_key(call: dict) -> tuple[str, str]:
     return call["name"], json.dumps(args, sort_keys=True)
 
 
+_active_turn: dict = {}
+
+
 def run_turn(user_text: str, on_phone: bool = False):
     """Yield ("text", delta), ("tool", name, args), ("step", summary) and ("status", text) events."""
-    global _turn_counter
+    global _turn_counter, _active_turn
+    me = {"cancel": threading.Event(), "closed": False}
     with history_lock:
         _turn_counter += 1
+        # the user spoke over (or cancelled) the previous answer, which may still be running in
+        # its thread: close it off now, so this question isn't mixed up with the old one
+        previous = _active_turn
+        if previous and not previous["closed"]:
+            previous["cancel"].set()
+            previous["closed"] = True
+            history.append({"role": "assistant", "content": "[the user interrupted this answer; don't continue it "
+                                                            "unless asked]"})
+        _active_turn = me
         history.append({"role": "user", "content": user_text})
         convo = build_convo(on_phone)
     turn_start = len(convo) - 1
@@ -660,6 +684,8 @@ def run_turn(user_text: str, on_phone: bool = False):
             content = ""
             hold = wants_action and not executed and not nudged
             for delta in stream_with_fallback(convo, use_tools=step < MAX_STEPS - 1 and not no_tools):
+                if me["cancel"].is_set():
+                    return
                 if "_wait" in delta:
                     why = delta.get("_why", "busy")
                     yield ("status", f"{why}, continuing in {round(delta['_wait'])}s")
@@ -711,6 +737,8 @@ def run_turn(user_text: str, on_phone: bool = False):
                         args = {}
                 except json.JSONDecodeError:
                     args = {}
+                if me["cancel"].is_set():
+                    return  # interrupted: don't start more actions
                 yield ("tool", c["name"], args)
                 result = run_tool(c["name"], args, ctx)
                 summary = step_summary(c["name"], args, result)
@@ -728,9 +756,11 @@ def run_turn(user_text: str, on_phone: bool = False):
         # next turn sees an unanswered request and acts on it again.
         reply = final.strip() or "[interrupted before replying; do not act on that request again unless asked]"
         with history_lock:
-            history.append({"role": "assistant", "content": reply})
+            if not me["closed"]:
+                me["closed"] = True
+                history.append({"role": "assistant", "content": reply})
             del history[:-MAX_HISTORY]
-        if final.strip():
+        if final.strip() and not me["cancel"].is_set():
             store.log_exchange(user_text, split_code(final)[0] or final.strip(), "phone" if on_phone else "pc", steps)
 
 
@@ -813,6 +843,7 @@ TOOL_FILLERS = {
     "web_search": None, "get_news": None,
     "speed_test": "Running a speed test, this takes about 15 seconds.",
     "run_command": "On it.",
+    "look_at_screen": "Taking a look.",
 }
 _filler_audio: dict[str, str] = {}
 
@@ -1097,6 +1128,77 @@ def health():
     }
 
 
+def _timed_check(name: str, fn) -> dict:
+    started = time.time()
+    try:
+        ok, detail = fn()
+    except Exception as e:  # noqa: BLE001
+        ok, detail = False, friendly_error(e)
+    return {"name": name, "ok": ok, "detail": detail, "ms": int((time.time() - started) * 1000)}
+
+
+def _check_groq():
+    if not GROQ_API_KEY:
+        return False, "GROQ_API_KEY missing in .env"
+    r = http.get("https://api.groq.com/openai/v1/models", headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                 timeout=(6, 12))
+    if r.status_code == 401:
+        return False, "Groq key rejected (401)"
+    if r.status_code != 200:
+        return False, f"Groq answered {r.status_code}"
+    models = {m["id"] for m in r.json().get("data", [])}
+    missing = [m for m in (GROQ_MODEL, FALLBACK_MODEL, vision.VISION_MODEL) if m not in models]
+    return not missing, "reachable" + (f"; models not available: {', '.join(missing)}" if missing else "")
+
+
+def _check_deepgram():
+    if not DEEPGRAM_API_KEY:
+        return False, "DEEPGRAM_API_KEY missing in .env"
+    r = http.get("https://api.deepgram.com/v1/projects", headers={"Authorization": f"Token {DEEPGRAM_API_KEY}"},
+                 timeout=(6, 12))
+    if r.status_code in (401, 403):
+        return False, f"Deepgram key rejected ({r.status_code})"
+    return r.status_code == 200, "reachable" if r.status_code == 200 else f"Deepgram answered {r.status_code}"
+
+
+def _check_state():
+    store.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    probe = store.STATE_DIR / ".write_test"
+    probe.write_text("ok", encoding="utf-8")
+    probe.unlink()
+    return True, str(store.STATE_DIR)
+
+
+@app.get("/api/diagnostics")
+def diagnostics():
+    """Checks for the diagnostics panel: keys, services, storage, phone access."""
+    checks = [("Groq (brain)", _check_groq), ("Deepgram (hearing + voice)", _check_deepgram),
+              ("Saved settings/memory", _check_state)]
+    with ThreadPoolExecutor(max_workers=len(checks)) as pool:
+        results = list(pool.map(lambda c: _timed_check(*c), checks))
+    results += [
+        {"name": "Telugu/Hindi voice", "ok": True,
+         "detail": "Sarvam AI" if SARVAM_API_KEY else "device voice (add SARVAM_API_KEY for a better one)"},
+        {"name": "Web search", "ok": True,
+         "detail": "Tavily" if os.getenv("TAVILY_API_KEY") else "free search engines (no key)"},
+        {"name": "Phone access", "ok": True,
+         "detail": f"https://{phone.lan_ip()}:{PHONE_PORT}" if PHONE_ENABLED else "off (ANVI_PHONE=0)"},
+    ]
+    return {"checks": results, "settings": store.settings(), "models": {
+        "chat": GROQ_MODEL, "fallback": FALLBACK_MODEL, "vision": vision.VISION_MODEL,
+        "hearing": f"{STT_MODEL} ({STT_LANGUAGE})"}}
+
+
+@app.post("/api/voice-test")
+def voice_test():
+    """A short spoken sentence, to check the speakers and the voice service."""
+    try:
+        clip = synthesize(f"Hi, this is {store.settings()['wake_word']}. If you can hear me, my voice is working.")
+    except Exception as e:  # noqa: BLE001
+        return api_error(e)
+    return {"clip": clip}
+
+
 # Plain `def` endpoints run in FastAPI's threadpool, so blocking HTTP calls
 # don't freeze the server.
 @app.post("/api/transcribe")
@@ -1201,6 +1303,8 @@ class SettingsIn(BaseModel):
     voice: str | None = None
     language: str | None = None
     speak_replies: bool | None = None
+    barge_in: bool | None = None
+    sounds: bool | None = None
 
 
 @app.get("/api/settings")
@@ -1252,6 +1356,11 @@ def api_extract(file: UploadFile = File(...)):
     data = file.file.read(30 * 1024 * 1024 + 1)
     if len(data) > 30 * 1024 * 1024:
         return JSONResponse({"error": "file is larger than 30 MB"}, status_code=413)
+    if vision.is_image(name):
+        result = vision.describe_image_bytes(data, name, "Describe this image and read out any text in it.")
+        if result.get("error"):
+            return JSONResponse(result, status_code=422)
+        return {"name": name, "text": result["answer"], "truncated": False, "kind": "image description"}
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / name
         path.write_bytes(data)

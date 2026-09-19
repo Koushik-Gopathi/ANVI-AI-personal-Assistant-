@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -12,6 +13,7 @@ import 'orb.dart';
 import 'phone_skills.dart';
 import 'screens.dart';
 import 'store.dart';
+import 'vision.dart';
 
 const bg = Color(0xFF080B14);
 const cyan = Color(0xFF5FE3FF);
@@ -223,6 +225,24 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   late final Assistant anvi = Assistant(widget.cfg);
 
+  // what you can ask: shown while idle, until the first exchange
+  static const _suggestions = [
+    '“read my WhatsApp notifications”',
+    '“look at this bill and tell me the amount”',
+    '“call Amma”',
+    '“what\'s on my calendar tomorrow?”',
+    '“turn on the flashlight”',
+    '“open Instagram”',
+    '“set an alarm for 6:30”',
+    '“gold rate in Hyderabad today”',
+    '“remember my exam is on 3rd October”',
+    '“good morning”',
+    '“open Chrome on my laptop”',
+    '“WhatsApp Rahul I\'m running late”',
+  ];
+  int _suggestion = DateTime.now().second % _suggestions.length;
+  Timer? _suggestionTimer;
+
   @override
   void initState() {
     super.initState();
@@ -231,6 +251,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     anvi.onCode.listen((_) => _showCode());
     anvi.tools.pc.refreshToolDefs(force: true);
     PhoneSkills.startNotificationListener();
+    _suggestionTimer = Timer.periodic(const Duration(seconds: 7), (_) {
+      if (mounted && anvi.you.isEmpty) setState(() => _suggestion = (_suggestion + 1) % _suggestions.length);
+    });
     _share.setMethodCallHandler((call) async {
       if (call.method == 'shared') _onShared(Map<String, dynamic>.from(call.arguments as Map));
     });
@@ -260,6 +283,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       final lower = name.toLowerCase();
       final ext = lower.contains('.') ? lower.substring(lower.lastIndexOf('.')) : '';
       String? body;
+      if ('${f['mime']}'.startsWith('image/')) {
+        setState(() => anvi.detail = 'looking at the photo');
+        final r = await PhoneVision.ask(
+            widget.cfg, anvi.client, await File('${f['path']}').readAsBytes(), 'Describe this image and read out any text in it.');
+        parts.add(r['error'] != null
+            ? 'I shared the photo "$name", but it could not be read: ${r['error']}'
+            : 'I shared the photo "$name". What it shows: ${r['answer']}');
+        continue;
+      }
       if (ext == '.txt' || ext == '.md' || ext == '.csv' || '${f['mime']}'.startsWith('text/')) {
         try {
           body = await File('${f['path']}').readAsString();
@@ -281,7 +313,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
     }
     if (parts.isEmpty || !mounted) return;
-    parts.add('Summarise it briefly (for a document: the main points), then ask what I want to do with it.');
+    parts.add('Summarise it briefly (for a document: the main points; for a photo: what it shows and any important '
+        'text), then ask what I want to do with it.');
     await anvi.ask(parts.join('\n\n'));
   }
 
@@ -323,6 +356,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _suggestionTimer?.cancel();
     anvi.dispose();
     super.dispose();
   }
@@ -485,6 +519,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 )),
             const SizedBox(height: 6),
             Text((_micAllowed ? anvi.hint : 'tap the orb to allow').toUpperCase(), style: const TextStyle(fontSize: 9, letterSpacing: 2.5, color: Color(0xFF4A5663))),
+            AnimatedOpacity(
+              opacity: _micAllowed && anvi.you.isEmpty && anvi.error == null &&
+                      (anvi.mode == OrbMode.sleep || anvi.mode == OrbMode.listening)
+                  ? 1
+                  : 0,
+              duration: const Duration(milliseconds: 500),
+              child: Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Text('try: ${_suggestions[_suggestion]}',
+                    textAlign: TextAlign.center, style: const TextStyle(fontSize: 12.5, color: Color(0xFF6F8494))),
+              ),
+            ),
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
               child: Row(children: [

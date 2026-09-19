@@ -48,6 +48,8 @@ DEFAULTS = {
     "voice": os.getenv("DEEPGRAM_TTS_VOICE", "aura-asteria-en"),
     "language": "english",
     "speak_replies": True,
+    "barge_in": True,  # talking while Karen speaks interrupts her
+    "sounds": True,  # small chimes for wake, tasks, done and errors
 }
 
 
@@ -84,8 +86,9 @@ def update_settings(patch: dict) -> dict:
         if patch["language"] not in LANGUAGES:
             raise ValueError("unknown language")
         current["language"] = patch["language"]
-    if "speak_replies" in patch:
-        current["speak_replies"] = bool(patch["speak_replies"])
+    for flag in ("speak_replies", "barge_in", "sounds"):
+        if flag in patch:
+            current[flag] = bool(patch[flag])
     with _lock:
         _write_json(SETTINGS_FILE, {k: current[k] for k in DEFAULTS})
     return current

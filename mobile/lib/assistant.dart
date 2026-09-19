@@ -8,9 +8,12 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'brain.dart';
 import 'config.dart';
+import 'diag.dart';
 import 'orb.dart';
+import 'sounds.dart';
 import 'store.dart';
 import 'tools.dart';
+import 'vision.dart';
 import 'voice.dart';
 
 class CodeBlock {
@@ -88,6 +91,7 @@ class Assistant extends ChangeNotifier {
   Assistant(this.cfg) {
     player.onStart = () {
       if (mode == OrbMode.thinking) _setMode(OrbMode.speaking);
+      _startBargeListening();
     };
     player.onProblem = _showError;
   }
@@ -117,6 +121,9 @@ class Assistant extends ChangeNotifier {
   }
 
   void _showError(String message) {
+    Diag.lastError = message;
+    Diag.lastErrorAt = DateTime.now();
+    Sounds.play('error');
     error = message.length > 90 ? '${message.substring(0, 90)}…' : message;
     notifyListeners();
     _errorTimer?.cancel();
@@ -129,6 +136,7 @@ class Assistant extends ChangeNotifier {
   // --- sleep / wake ---------------------------------------------------------
   Future<void> startPassive() async {
     if (awake || paused) return;
+    _plainMic();
     mic.asleep = true;
     mic.onUtterance = _onWakeCandidate;
     passive = await mic.start();
@@ -155,6 +163,7 @@ class Assistant extends ChangeNotifier {
     if (awake) return;
     awake = true;
     passive = false;
+    Sounds.play('wake');
     HapticFeedback.mediumImpact();
     WakelockPlus.enable();
     if (request.isNotEmpty) {
@@ -169,6 +178,7 @@ class Assistant extends ChangeNotifier {
     await player.stop();
     awake = false;
     detail = '';
+    Sounds.play('sleep');
     HapticFeedback.lightImpact();
     WakelockPlus.disable();
     _setMode(OrbMode.sleep);
@@ -197,10 +207,86 @@ class Assistant extends ChangeNotifier {
     return wakeUp();
   }
 
+  // --- talking over Karen (barge-in) ---------------------------------------------
+  bool _bargeChecking = false;
+  static final _stopOnly = RegExp(
+      r'^\s*(?:(?:hey|ok|okay|no|please|karen)[\s,.!]*)*(?:stop|wait|enough|shut up|be quiet|quiet|cancel|hold on|pause)'
+      r'(?:[\s,.!]*(?:it|that|talking|please|karen))*[\s.!]*$',
+      caseSensitive: false);
+  static const _fillerLines = [
+    'one sec let me check', 'let me look that up', 'give me a second', 'running a speed test this takes about 15 seconds',
+    'on it', 'opening the camera',
+  ];
+
+  void _plainMic() {
+    mic.strict = false;
+    mic.onSpeechStart = null;
+    mic.onFalseStart = null;
+    player.duck(false);
+  }
+
+  /// While Karen talks, keep listening for the user talking over her.
+  Future<void> _startBargeListening() async {
+    if (!Store.instance.bargeIn || paused || _bargeChecking || mode != OrbMode.speaking) return;
+    mic
+      ..asleep = false
+      ..strict = true
+      ..onUtterance = _onBargeIn
+      ..onSpeechStart = (() => player.duck(true))
+      ..onFalseStart = (() => player.duck(false));
+    await mic.start();
+  }
+
+  /// Words Karen herself is saying, picked up by the microphone.
+  bool _isEcho(String text) {
+    List<String> words(String t) =>
+        RegExp(r'[a-z0-9\u0900-\u097f\u0c00-\u0c7f]{3,}').allMatches(t.toLowerCase()).map((m) => m.group(0)!).toList();
+    final heard = words(text);
+    if (heard.isEmpty) return true;
+    final plain = text.toLowerCase().replaceAll(RegExp(r'[^a-z0-9\s]'), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (plain.isNotEmpty && _fillerLines.any((line) => line.contains(plain))) return true;
+    final said = words(reply).toSet();
+    return heard.where(said.contains).length / heard.length >= 0.6;
+  }
+
+  Future<void> _onBargeIn(Uint8List wav) async {
+    if (mode != OrbMode.speaking || _bargeChecking) return;
+    _bargeChecking = true;
+    var text = '';
+    try {
+      text = await deepgram.transcribe(wav);
+    } catch (_) {}
+    _bargeChecking = false;
+    final words = text.trim().split(RegExp(r'\s+')).where((w) => w.isNotEmpty).length;
+    final real = text.trim().isNotEmpty && !_isEcho(text) && (_stopOnly.hasMatch(text) || words >= 2);
+    if (!real) {
+      if (text.trim().isNotEmpty) Diag.echoesIgnored++;
+      player.duck(false);
+      return;
+    }
+    Diag.bargeIns++;
+    _gen++;
+    await player.stop();
+    await mic.stop();
+    _plainMic();
+    if (isSleepCommand(text)) {
+      you = text;
+      reply = '';
+      return goToSleep();
+    }
+    if (_stopOnly.hasMatch(text)) {
+      you = text;
+      notifyListeners();
+      return _afterTurn();
+    }
+    await ask(text);
+  }
+
   // --- listening --------------------------------------------------------------
   Future<void> listen() async {
     if (!awake || paused) return;
     _setMode(OrbMode.listening);
+    _plainMic();
     mic.asleep = false;
     mic.onUtterance = _onUtterance;
     if (!await mic.start()) {
@@ -327,11 +413,13 @@ class Assistant extends ChangeNotifier {
             }
             notifyListeners();
           case ToolStarted(:final name, :final args):
+            Sounds.play('tick');
             detail = toolStatus(name, args);
             if (!_filled && _clips.isEmpty && buffer.trim().isEmpty && Store.instance.language == 'english') {
               final filler = switch (name) {
                 'web_search' || 'get_news' => _fillers[Random().nextInt(_fillers.length)],
                 'speed_test' => 'Running a speed test, this takes about 15 seconds.',
+                'look_with_camera' => args['source'] == 'gallery' ? null : 'Opening the camera.',
                 'run_command' => 'On it.',
                 _ => null,
               };
@@ -375,6 +463,7 @@ class Assistant extends ChangeNotifier {
       await _pump;
       await player.finished();
       if (gen != _gen) return;
+      if (steps.isNotEmpty && steps.every((s) => s.$2 == 'done')) Sounds.play('done');
       await _afterTurn();
     } catch (e) {
       if (gen != _gen) return;
@@ -386,6 +475,7 @@ class Assistant extends ChangeNotifier {
   // --- app lifecycle ------------------------------------------------------------
   Future<void> pause() async {
     if (Store.instance.backgroundListening) return; // the foreground service keeps the mic alive
+    if (PhoneVision.busy) return; // Karen opened the camera herself and is waiting for the photo
     paused = true;
     _gen++;
     await player.stop();

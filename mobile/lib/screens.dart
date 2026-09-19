@@ -1,9 +1,14 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:notification_listener_service/notification_listener_service.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'assistant.dart';
 import 'background.dart';
+import 'diag.dart';
+import 'orb.dart';
 import 'main.dart';
 import 'phone_skills.dart';
 import 'store.dart';
@@ -173,6 +178,24 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
           },
         ),
         SwitchListTile(
+          title: const Text('Stop talking when I start speaking'),
+          subtitle: const Text('Talk over me to interrupt, or say “stop”. Works best with earphones.', style: _sub),
+          value: store.bargeIn,
+          onChanged: (v) {
+            store.bargeIn = v;
+            _save();
+          },
+        ),
+        SwitchListTile(
+          title: const Text('Sounds'),
+          subtitle: const Text('Small chimes when I wake, start a task, finish, or hit an error', style: _sub),
+          value: store.sounds,
+          onChanged: (v) {
+            store.sounds = v;
+            _save();
+          },
+        ),
+        SwitchListTile(
           title: const Text('Listen in the background'),
           subtitle: const Text(
               'Keeps listening for my name when the app is in Recents or the screen is off. '
@@ -232,6 +255,14 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
           leading: const Icon(Icons.qr_code_scanner),
           title: const Text('Scan setup code again'),
           onTap: widget.onRescan,
+        ),
+        _heading('Help'),
+        ListTile(
+          leading: const Icon(Icons.monitor_heart_outlined),
+          title: const Text('Diagnostics'),
+          subtitle: const Text("Check that I can hear you, speak, and reach the internet and your laptop", style: _sub),
+          onTap: () => Navigator.of(context)
+              .push(MaterialPageRoute(builder: (_) => DiagnosticsScreen(anvi: widget.anvi, granted: _granted))),
         ),
         _heading('Conversation'),
         ListTile(
@@ -330,6 +361,180 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 );
               },
             ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics: is she hearing me, is she making sound, can she reach the services?
+// ---------------------------------------------------------------------------
+class DiagnosticsScreen extends StatefulWidget {
+  final Assistant anvi;
+  final Map<String, bool> granted;
+  const DiagnosticsScreen({super.key, required this.anvi, required this.granted});
+
+  @override
+  State<DiagnosticsScreen> createState() => _DiagnosticsScreenState();
+}
+
+class _Check {
+  final String name;
+  final bool ok;
+  final String detail;
+  _Check(this.name, this.ok, this.detail);
+}
+
+class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
+  late final Timer _timer;
+  List<_Check>? _checks;
+  String _voiceNote = '';
+  bool _background = false;
+
+  Assistant get anvi => widget.anvi;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(milliseconds: 150), (_) => setState(() {}));
+    _runChecks();
+  }
+
+  @override
+  void dispose() {
+    _timer.cancel();
+    super.dispose();
+  }
+
+  Future<_Check> _timed(String name, Future<(bool, String)> Function() check) async {
+    final watch = Stopwatch()..start();
+    try {
+      final (ok, detail) = await check().timeout(const Duration(seconds: 20));
+      return _Check(name, ok, '$detail (${watch.elapsedMilliseconds} ms)');
+    } catch (e) {
+      return _Check(name, false, e is TimeoutException ? 'no answer in 20 s — internet slow?' : '$e');
+    }
+  }
+
+  Future<void> _runChecks() async {
+    setState(() => _checks = null);
+    final cfg = anvi.cfg;
+    final client = anvi.client;
+    final results = await Future.wait([
+      _timed('Groq (brain + eyes)', () async {
+        final r = await client.get(Uri.parse('https://api.groq.com/openai/v1/models'),
+            headers: {'Authorization': 'Bearer ${cfg.groqKey}'});
+        if (r.statusCode == 401) return (false, 'key rejected — scan the setup code again');
+        return (r.statusCode == 200, r.statusCode == 200 ? 'reachable' : 'answered ${r.statusCode}');
+      }),
+      _timed('Deepgram (hearing + voice)', () async {
+        final r = await client.get(Uri.parse('https://api.deepgram.com/v1/projects'),
+            headers: {'Authorization': 'Token ${cfg.deepgramKey}'});
+        if (r.statusCode == 401 || r.statusCode == 403) return (false, 'key rejected — scan the setup code again');
+        return (r.statusCode == 200, r.statusCode == 200 ? 'reachable' : 'answered ${r.statusCode}');
+      }),
+      _timed('Laptop', () async {
+        if (!cfg.hasPc) return (false, 'not set up — scan the setup code from Karen on the laptop');
+        await anvi.tools.pc.refreshToolDefs(force: true);
+        final n = anvi.tools.pc.toolDefs.length;
+        return n > 0 ? (true, 'connected, $n laptop actions') : (false, "can't reach it — Karen open on the laptop, same network?");
+      }),
+    ]);
+    _background = await FlutterForegroundTask.isRunningService;
+    if (mounted) setState(() => _checks = results);
+  }
+
+  Future<void> _testVoice() async {
+    setState(() => _voiceNote = 'getting the voice…');
+    try {
+      final clip = await anvi.deepgram
+          .speak('Hi, this is ${Store.instance.wakeWord}. If you can hear me, my voice is working.');
+      anvi.player.add(clip);
+      setState(() => _voiceNote = 'playing — did you hear it? If not, turn the media volume up.');
+    } catch (e) {
+      setState(() => _voiceNote = 'voice failed: $e');
+    }
+  }
+
+  Widget _row(String name, String value, {bool bad = false}) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          SizedBox(width: 130, child: Text(name, style: const TextStyle(color: muted, fontSize: 12.5))),
+          Expanded(
+            child: Text(value,
+                style: TextStyle(
+                    fontFamily: 'monospace', fontSize: 12, color: bad ? const Color(0xFFFF9AA6) : textColor)),
+          ),
+        ]),
+      );
+
+  Widget _meter(String name, double level) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(children: [
+          SizedBox(width: 130, child: Text(name, style: const TextStyle(color: Color(0xFFB8C7D3)))),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: LinearProgressIndicator(
+                value: level.clamp(0.0, 1.0),
+                minHeight: 8,
+                backgroundColor: const Color(0x155FE3FF),
+                color: cyan,
+              ),
+            ),
+          ),
+        ]),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final store = Store.instance;
+    final mic = anvi.mic;
+    String yesNo(bool? v) => v == null ? '…' : (v ? 'allowed' : 'NOT allowed');
+    return Scaffold(
+      appBar: AppBar(title: const Text('Diagnostics'), backgroundColor: bg),
+      body: ListView(padding: const EdgeInsets.all(16), children: [
+        const Text("Speak and watch the microphone bar. If it doesn't move, I can't hear you.",
+            style: TextStyle(color: muted)),
+        const SizedBox(height: 10),
+        _meter('Microphone', mic.level * 12),
+        _meter('My voice', anvi.player.playing ? 0.6 : 0),
+        const SizedBox(height: 10),
+        _row('State', '${anvi.mode.name}${anvi.awake ? ' (awake)' : anvi.passive ? ' (asleep, listening for “${store.wakeWord}”)' : ''}'
+            '${anvi.paused ? ' · paused (app in background)' : ''}'),
+        _row('Microphone', mic.running ? 'on' : 'off', bad: !mic.running && anvi.mode != OrbMode.thinking && anvi.mode != OrbMode.speaking),
+        _row('Last heard', Diag.heard.isEmpty ? 'nothing yet' : '“${Diag.heard}” · ${Diag.ago(Diag.heardAt)} · ${Diag.sttMs} ms'),
+        _row('Heard while asleep', Diag.wakeHeard.isEmpty ? 'nothing yet' : '“${Diag.wakeHeard}”'),
+        _row('Voice clips', '${Diag.clipsPlayed} played${Diag.clipsFailed > 0 ? ', ${Diag.clipsFailed} failed' : ''}',
+            bad: Diag.clipsFailed > 0),
+        _row('Interrupting', store.bargeIn ? 'on · ${Diag.bargeIns} interruptions, ${Diag.echoesIgnored} echoes ignored' : 'off'),
+        _row('Language', '${Store.languages[store.language]}${store.language != 'english' && anvi.cfg.sarvamKey.isEmpty ? ' · phone voice (no Sarvam key)' : ''}'),
+        _row('Background listening', store.backgroundListening ? (_background ? 'on, running' : 'on, but NOT running — reopen the app') : 'off',
+            bad: store.backgroundListening && !_background),
+        _row('Last error', Diag.lastError.isEmpty ? 'none' : '${Diag.lastError} · ${Diag.ago(Diag.lastErrorAt)}',
+            bad: Diag.lastError.isNotEmpty),
+        const SizedBox(height: 12),
+        Wrap(spacing: 10, runSpacing: 8, children: [
+          FilledButton.tonal(onPressed: _testVoice, child: const Text('Test voice')),
+          FilledButton.tonal(onPressed: _runChecks, child: const Text('Check services again')),
+        ]),
+        if (_voiceNote.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_voiceNote, style: _sub)),
+        _heading('Services'),
+        if (_checks == null) const Padding(padding: EdgeInsets.all(8), child: Text('Checking…', style: TextStyle(color: muted))),
+        for (final c in _checks ?? <_Check>[])
+          ListTile(
+            dense: true,
+            leading: Icon(c.ok ? Icons.check_circle : Icons.error_outline,
+                color: c.ok ? const Color(0xFF4FD19B) : const Color(0xFFFF7A8A)),
+            title: Text(c.name),
+            subtitle: Text(c.detail, style: _sub),
+          ),
+        _heading('Permissions'),
+        _row('Microphone', yesNo(widget.granted['mic']), bad: widget.granted['mic'] == false),
+        _row('Contacts', yesNo(widget.granted['contacts']), bad: widget.granted['contacts'] == false),
+        _row('Calendar', yesNo(widget.granted['calendar']), bad: widget.granted['calendar'] == false),
+        _row('Notification access', yesNo(widget.granted['notifications']), bad: widget.granted['notifications'] == false),
+        _row('Unrestricted battery', yesNo(widget.granted['battery'])),
+      ]),
     );
   }
 }

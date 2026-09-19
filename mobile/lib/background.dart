@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 /// Keeps Karen's microphone alive while the app is in Recents or the screen is off,
@@ -30,7 +31,7 @@ class BackgroundListening {
     if (await FlutterForegroundTask.checkNotificationPermission() != NotificationPermission.granted) {
       await FlutterForegroundTask.requestNotificationPermission();
     }
-    if (await FlutterForegroundTask.isRunningService) return true;
+    if (await FlutterForegroundTask.isRunningService) return _keepAlive(true).then((_) => true);
     final result = await FlutterForegroundTask.startService(
       serviceId: 7,
       serviceTypes: [ForegroundServiceTypes.microphone],
@@ -38,12 +39,22 @@ class BackgroundListening {
       notificationText: 'Say "$name" any time. Turn this off in settings.',
       notificationInitialRoute: '/',
     );
-    return result is ServiceRequestSuccess;
+    final ok = result is ServiceRequestSuccess;
+    await _keepAlive(ok);
+    return ok;
   }
 
   static Future<void> stop() async {
     _init();
+    await _keepAlive(false);
     if (await FlutterForegroundTask.isRunningService) await FlutterForegroundTask.stopService();
+  }
+
+  /// Keep Karen's engine running when the app is swiped away (see MainActivity).
+  static Future<void> _keepAlive(bool on) async {
+    try {
+      await const MethodChannel('karen/share').invokeMethod('keepAlive', on);
+    } catch (_) {}
   }
 
   static Future<bool> get batteryUnrestricted => FlutterForegroundTask.isIgnoringBatteryOptimizations;

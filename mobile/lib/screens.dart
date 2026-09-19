@@ -63,6 +63,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
       'calendar': await Permission.calendarFullAccess.isGranted,
       'notifications': await NotificationListenerService.isPermissionGranted(),
       'battery': await BackgroundListening.batteryUnrestricted,
+      'overlay': await Permission.systemAlertWindow.isGranted,
     };
     if (values['notifications']!) PhoneSkills.startNotificationListener();
     if (mounted) setState(() => _granted.addAll(values));
@@ -214,6 +215,11 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
         _permission('notifications', Icons.notifications_none, 'Notification access',
             'To read your notifications aloud (e.g. WhatsApp messages).', () async {
           await NotificationListenerService.requestPermission();
+        }),
+        _permission('overlay', Icons.open_in_new, 'Open apps from the background',
+            "So “open WhatsApp” works while I'm in the background (Android calls it “display over other apps”).",
+            () async {
+          await Permission.systemAlertWindow.request();
         }),
         _permission('battery', Icons.battery_saver_outlined, 'Unrestricted battery',
             'So Android doesn\'t stop background listening.', () async {
@@ -534,6 +540,7 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
         _row('Calendar', yesNo(widget.granted['calendar']), bad: widget.granted['calendar'] == false),
         _row('Notification access', yesNo(widget.granted['notifications']), bad: widget.granted['notifications'] == false),
         _row('Unrestricted battery', yesNo(widget.granted['battery'])),
+        _row('Open apps from background', yesNo(widget.granted['overlay'])),
       ]),
     );
   }

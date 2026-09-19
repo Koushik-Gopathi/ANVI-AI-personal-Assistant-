@@ -14,7 +14,7 @@ class Store {
   String voice = 'aura-asteria-en';
   String language = 'english'; // english | telugu | hindi | auto
   bool speakReplies = true;
-  bool backgroundListening = false;
+  bool backgroundListening = true; // keeps listening in Recents / after swiping the app away
   bool bargeIn = true; // talking while Karen speaks interrupts her
   bool sounds = true;
 

@@ -165,7 +165,7 @@ class Assistant extends ChangeNotifier {
     passive = false;
     Sounds.play('wake');
     HapticFeedback.mediumImpact();
-    WakelockPlus.enable();
+    WakelockPlus.enable().catchError((_) {}); // no screen when running in the background
     if (request.isNotEmpty) {
       await mic.stop();
       return ask(request);
@@ -180,7 +180,7 @@ class Assistant extends ChangeNotifier {
     detail = '';
     Sounds.play('sleep');
     HapticFeedback.lightImpact();
-    WakelockPlus.disable();
+    WakelockPlus.disable().catchError((_) {});
     _setMode(OrbMode.sleep);
     await mic.stop();
     await startPassive();

@@ -1,32 +1,77 @@
 package com.koushik.anvi
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.OpenableColumns
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.FlutterEngineCache
+import io.flutter.embedding.engine.dart.DartExecutor
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 
-/** Receives things shared to Karen from other apps (text, links, documents). */
+/**
+ * Karen's screen. Her brain (the Flutter engine running the assistant) is kept in a cache instead of
+ * belonging to this window, so with background listening on she keeps listening after the app is
+ * swiped away from Recents: the foreground service keeps the process alive, and reopening the app
+ * reconnects to the same running Karen. Also receives things shared to Karen from other apps.
+ */
 class MainActivity : FlutterActivity() {
+    companion object {
+        private const val ENGINE_ID = "karen"
+
+        /** Set from Dart: true while background listening is on. */
+        @Volatile
+        var keepAlive = false
+    }
+
     private var channel: MethodChannel? = null
     private var pending: Map<String, Any?>? = null
+    private var reusedEngine = false
+
+    override fun provideFlutterEngine(context: Context): FlutterEngine {
+        FlutterEngineCache.getInstance().get(ENGINE_ID)?.let {
+            reusedEngine = true
+            return it
+        }
+        val engine = FlutterEngine(context.applicationContext)
+        engine.dartExecutor.executeDartEntrypoint(DartExecutor.DartEntrypoint.createDefault())
+        FlutterEngineCache.getInstance().put(ENGINE_ID, engine)
+        return engine
+    }
+
+    override fun shouldDestroyEngineWithHost(): Boolean = !keepAlive
+
+    override fun onDestroy() {
+        if (!keepAlive) FlutterEngineCache.getInstance().remove(ENGINE_ID)
+        super.onDestroy()
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "karen/share").also {
             it.setMethodCallHandler { call, result ->
-                if (call.method == "takeShared") {
-                    result.success(pending)
-                    pending = null
-                } else {
-                    result.notImplemented()
+                when (call.method) {
+                    "takeShared" -> {
+                        result.success(pending)
+                        pending = null
+                    }
+                    "keepAlive" -> {
+                        keepAlive = call.arguments == true
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
                 }
             }
         }
-        pending = readShare(intent)
+        val shared = readShare(intent)
+        if (reusedEngine && shared != null) {
+            channel?.invokeMethod("shared", shared) // Karen is already running: hand it over now
+        } else {
+            pending = shared
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

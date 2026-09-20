@@ -5,16 +5,21 @@ Nothing is saved: the screenshot or photo is shrunk, sent with the question, and
 
 import base64
 import io
-import os
 from pathlib import Path
 
 from net import friendly_error, http
 
-VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".heic", ".tif", ".tiff"}
 PROMPT = ("You are the eyes of a voice assistant. Answer the question about the image in a few short, plain "
           "sentences that can be read aloud. Copy important text, numbers, amounts, dates and error messages "
           "exactly. If you can't see or read something clearly, say so instead of guessing.")
+
+
+def model() -> str:
+    """The vision model of the brain currently chosen in Settings."""
+    import main
+
+    return main.brain()["vision"]
 
 
 def _jpeg(image, max_side: int = 1600) -> bytes:
@@ -27,18 +32,20 @@ def _jpeg(image, max_side: int = 1600) -> bytes:
 
 def ask_image(jpeg: bytes, question: str) -> dict:
     """Ask the vision model about one JPEG image."""
-    key = os.getenv("GROQ_API_KEY", "")
+    import main
+
+    key, url = main.brain_key(), main.brain()["url"]
     if not key:
-        return {"error": "GROQ_API_KEY is missing in .env"}
+        return {"error": "no API key for the chosen brain (see .env)"}
     content = [
         {"type": "text", "text": question.strip() or "What is in this image? Read out any important text."},
         {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()}},
     ]
     try:
         r = http.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {key}"},
-            json={"model": VISION_MODEL, "max_tokens": 700, "temperature": 0.2,
+            url,
+            headers={"Authorization": f"Bearer {key}", "X-Title": "Karen"},
+            json={"model": model(), "max_tokens": 700, "temperature": 0.2,
                   "messages": [{"role": "system", "content": PROMPT}, {"role": "user", "content": content}]},
             timeout=(15, 90),
         )

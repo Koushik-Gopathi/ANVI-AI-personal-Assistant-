@@ -956,6 +956,7 @@ const historyModal = $("historyModal");
 const diagModal = $("diagModal");
 let languageNames = {};
 let indianVoice = "device";
+let brains = {};
 
 for (const modal of [settingsModal, historyModal, diagModal]) {
   modal.addEventListener("click", (e) => {
@@ -967,6 +968,7 @@ async function loadSettings() {
   const data = await fetch("/api/settings").then((r) => r.json());
   languageNames = data.languages;
   indianVoice = data.indian_voice;
+  brains = data.brains || {};
   prefs.barge_in = data.settings.barge_in !== false;
   prefs.sounds = data.settings.sounds !== false;
   setWakeWord(data.settings.wake_word);
@@ -979,6 +981,15 @@ function option(value, label, selected) {
   o.textContent = label;
   o.selected = value === selected;
   return o;
+}
+
+function updateBrainNote() {
+  const chosen = brains[$("setBrain").value];
+  $("brainNote").textContent = !chosen ? ""
+    : !chosen.available ? "Add OPENROUTER_API_KEY to .env and restart Karen to use this."
+    : $("setBrain").value === "mix"
+      ? "Free Groq for chat and questions; Claude Haiku 4.5 only when you ask for real work. Cheapest way to use the paid brain."
+      : `${chosen.models.join(", then ")}${$("setBrain").value === "openrouter" ? " — a few paise per request; Claude caches the prompt to keep it cheap" : ""}`;
 }
 
 function updateLangNote() {
@@ -1018,6 +1029,8 @@ async function openSettings() {
   try {
     const data = await loadSettings();
     const s = data.settings;
+    $("setBrain").replaceChildren(...Object.entries(data.brains).map(([k, v]) => option(k, v.label, s.brain)));
+    updateBrainNote();
     $("setWake").value = s.wake_word;
     $("setVoice").replaceChildren(...Object.entries(data.voices).map(([k, v]) => option(k, v, s.voice)));
     $("setLanguage").replaceChildren(...Object.entries(data.languages).map(([k, v]) => option(k, v, s.language)));
@@ -1032,10 +1045,12 @@ async function openSettings() {
 }
 
 $("setLanguage").addEventListener("change", updateLangNote);
+$("setBrain").addEventListener("change", updateBrainNote);
 
 $("settingsForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const body = {
+    brain: $("setBrain").value,
     wake_word: $("setWake").value.trim(),
     voice: $("setVoice").value,
     language: $("setLanguage").value,
@@ -1155,7 +1170,14 @@ async function runDiagChecks() {
       innerHTML: "<b>·</b>",
       title: "models",
     }));
-    list.lastChild.append(`Models: ${data.models.chat} · vision ${data.models.vision} · hearing ${data.models.hearing}`);
+    list.lastChild.append(`Models: ${data.models.chat} → ${data.models.fallback} · vision ${data.models.vision}`
+      + ` · hearing ${data.models.hearing}`);
+    if (data.spending && data.spending.summary) {
+      const li = document.createElement("li");
+      li.innerHTML = "<b>₹</b>";
+      li.append(data.spending.summary);
+      list.appendChild(li);
+    }
   } catch (_) {
     list.innerHTML = '<li class="bad"><b>✕</b>Karen\'s backend isn\'t answering — is it running?</li>';
   }

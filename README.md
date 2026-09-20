@@ -93,6 +93,19 @@ While a task runs, the steps she takes appear above the reply (✓ done, ? waiti
 
 Only paired devices can use Karen: the QR code carries a secret stored as a cookie on the phone. Delete `.anvi\pairing_secret` and restart to unpair every device.
 
+## The brain (which AI thinks)
+
+Settings → **Brain**:
+
+| Choice | Models | Cost |
+| --- | --- | --- |
+| Groq (free) | `openai/gpt-oss-120b` → `20b` | free, rate limited |
+| OpenRouter (free models) | `qwen/qwen3.8-27b:free` → `gemma-4` | free with an OpenRouter key |
+| **Smart mix** | free Groq for chat, Claude Haiku 4.5 when you ask for work | a few paise a day |
+| OpenRouter (paid, best) | `anthropic/claude-haiku-4.5` → `gemini-3.1-flash-lite` | ~$0.0006-0.004 per request |
+
+Add `OPENROUTER_API_KEY` to `.env` for the OpenRouter choices (get a key at [openrouter.ai](https://openrouter.ai)). Claude caches the unchanging start of the prompt (tools + system prompt), so repeat requests cost about a tenth; Diagnostics shows the day's spend and how much came from the cache.
+
 ## Telugu and Hindi
 
 Pick the language in Settings (laptop ⚙ or phone ⚙). Karen then listens with Groq Whisper and replies in Telugu or Hindi script. For a natural voice add a free [Sarvam AI](https://sarvam.ai) key to `.env` as `SARVAM_API_KEY` (and rescan the setup code on the phone); without it, the device's own Telugu/Hindi voice is used if one is installed.

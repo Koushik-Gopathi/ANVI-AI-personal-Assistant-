@@ -12,7 +12,6 @@ import 'config.dart';
 /// Karen's eyes on the phone: one photo (camera or gallery), one question, one answer.
 /// The photo is sent to the vision model for this question and not kept anywhere.
 class PhoneVision {
-  static const model = 'qwen/qwen3.8-27b';
   static const _prompt = 'You are the eyes of a voice assistant. Answer the question about the image in a few short, '
       'plain sentences that can be read aloud. Copy important text, numbers, amounts, dates and names exactly. If '
       "you can't see or read something clearly, say so instead of guessing.";
@@ -49,7 +48,7 @@ class PhoneVision {
             ? 'image/webp'
             : 'image/jpeg';
     final body = jsonEncode({
-      'model': model,
+      'model': cfg.visionModel,
       'max_tokens': 700,
       'temperature': 0.2,
       'messages': [
@@ -69,8 +68,13 @@ class PhoneVision {
     for (var attempt = 1;; attempt++) {
       try {
         final r = await client
-            .post(Uri.parse('https://api.groq.com/openai/v1/chat/completions'),
-                headers: {'Authorization': 'Bearer ${cfg.groqKey}', 'Content-Type': 'application/json'}, body: body)
+            .post(Uri.parse(cfg.brainUrl),
+                headers: {
+                  'Authorization': 'Bearer ${cfg.brainKey}',
+                  'Content-Type': 'application/json',
+                  'X-Title': 'Karen',
+                },
+                body: body)
             .timeout(const Duration(seconds: 90));
         final data = jsonDecode(utf8.decode(r.bodyBytes));
         if (r.statusCode != 200) {

@@ -59,6 +59,72 @@ STT_LANGUAGE = os.getenv("DEEPGRAM_STT_LANGUAGE", "en-IN")  # Indian English: fa
 TTS_VOICE = os.getenv("DEEPGRAM_TTS_VOICE", "aura-asteria-en")
 PORT = int(os.getenv("APP_PORT", "8000"))
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "").strip()  # Telugu/Hindi voice
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()  # pay-as-you-go brain (optional)
+
+# Which brain Karen thinks with. Groq is free but limited; OpenRouter costs a few cents per hundred
+# requests and is much better at long multi-step jobs. Switched in Settings.
+BRAINS = {
+    "groq": {
+        "label": "Groq (free)",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "models": [GROQ_MODEL, FALLBACK_MODEL],
+        "vision": os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b"),
+    },
+    "openrouter_free": {
+        "label": "OpenRouter (free models)",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "models": [os.getenv("OPENROUTER_FREE_MODEL", "qwen/qwen3.8-27b:free"),
+                   os.getenv("OPENROUTER_FREE_FALLBACK_MODEL", "google/gemma-4-26b-a4b-it:free")],
+        "vision": "qwen/qwen3.8-27b:free",
+    },
+    "mix": {
+        "label": "Smart mix (free chat, Haiku for work)",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "models": [],  # filled per request by turn_models()
+        "vision": os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b"),
+    },
+    "openrouter": {
+        "label": "OpenRouter (paid, best)",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "models": [os.getenv("OPENROUTER_MODEL", "anthropic/claude-haiku-4.5"),
+                   os.getenv("OPENROUTER_FALLBACK_MODEL", "google/gemini-3.1-flash-lite")],
+        "vision": os.getenv("OPENROUTER_VISION_MODEL", "qwen/qwen3.8-27b:free"),
+    },
+}
+
+
+def brain_name() -> str:
+    """The chosen brain, falling back to Groq when OpenRouter has no key."""
+    chosen = store.settings().get("brain", "groq")
+    if chosen in ("openrouter", "openrouter_free", "mix") and not OPENROUTER_API_KEY:
+        return "groq"
+    if chosen == "mix" and not GROQ_API_KEY:
+        return "openrouter"
+    return chosen if chosen in BRAINS else "groq"
+
+
+def turn_models(wants_action: bool) -> list[tuple[str, str]]:
+    """(provider, model) to try for this turn, best first.
+
+    The smart mix keeps the free Groq models for chat and questions, and pays for Claude only when
+    the user actually asked for something to be done - each is the other's fallback, so a busy or
+    rate-limited model never stops the turn.
+    """
+    name = brain_name()
+    if name != "mix":
+        return [(name, m) for m in BRAINS[name]["models"] if m]
+    free = [("groq", m) for m in BRAINS["groq"]["models"]]
+    paid = [("openrouter", m) for m in BRAINS["openrouter"]["models"]]
+    return (paid + free) if wants_action else (free + paid)
+
+
+def brain() -> dict:
+    return BRAINS[brain_name()]
+
+
+def brain_key(name: str = "") -> str:
+    name = name or brain_name()
+    return OPENROUTER_API_KEY if name.startswith("openrouter") else (GROQ_API_KEY or "")
 PHONE_ENABLED = os.getenv("ANVI_PHONE", "1") == "1"
 PHONE_PORT = int(os.getenv("ANVI_PHONE_PORT", "8443"))
 # public HTTPS address that forwards to this PC, e.g. https://my-laptop.tail1234.ts.net (Tailscale)
@@ -440,9 +506,7 @@ TOKEN_LIMIT = 7600  # Groq free tier: ~8k tokens/minute per model, prompt + comp
 INPUT_BUDGET = 5400
 _turn_counter = 0
 # each model has its own per-minute token allowance, so an agent task can move between them
-MODELS = [GROQ_MODEL] + [m.strip() for m in os.getenv("GROQ_FALLBACK_MODELS", FALLBACK_MODEL).split(",")
-                         if m.strip() and m.strip() != GROQ_MODEL]
-MODELS = list(dict.fromkeys(MODELS))
+
 
 
 LANGUAGE_RULES = {
@@ -456,7 +520,6 @@ LANGUAGE_RULES = {
 
 
 def system_prompt(on_phone: bool = False) -> str:
-    now = datetime.now().astimezone()
     loc = weather.home_location().get("name") or "unknown"
     folders = agent.known_folders()
     settings = store.settings()
@@ -485,8 +548,13 @@ def system_prompt(on_phone: bool = False) -> str:
         f"Downloads {folders['downloads']}. "
         + ("The user is talking to you from their phone, not at the PC: PC actions happen on the PC, so say "
            "'on your PC'. " if on_phone else "")
-        + f"Current local date and time: {now:%A, %d %B %Y, %I:%M %p}. User's location: {loc}."
+        + f"The user's location is {loc}."
     )
+
+
+def time_note() -> dict:
+    """The clock, kept out of the system prompt so its start never changes (that's what Claude caches)."""
+    return {"role": "system", "content": f"Current local date and time: {datetime.now().astimezone():%A, %d %B %Y, %I:%M %p}."}
 
 
 TOOLS_TOKENS = len(json.dumps(TOOLS)) // 4
@@ -503,9 +571,10 @@ def build_convo(on_phone: bool = False) -> list[dict]:
         if m["role"] == "assistant" and i != last_assistant:
             m["content"] = FENCE.sub("[code omitted]", m["content"])
     system = {"role": "system", "content": system_prompt(on_phone)}
-    while len(msgs) > 1 and est_tokens([system, *msgs]) > INPUT_BUDGET:
+    clock = time_note()
+    while len(msgs) > 1 and est_tokens([system, clock, *msgs]) > INPUT_BUDGET:
         msgs.pop(0)
-    return [system, *msgs]
+    return [system, clock, *msgs]
 
 
 def compact_convo(convo: list[dict], turn_start: int) -> None:
@@ -538,27 +607,41 @@ def _retry_after(r) -> float:
     return (int(m.group(1) or 0) * 60 + float(m.group(2))) if m else 20.0
 
 
-def groq_stream(messages: list[dict], use_tools: bool, model: str):
-    if not GROQ_API_KEY:
-        raise RuntimeError("GROQ_API_KEY missing in .env")
+def groq_stream(messages: list[dict], use_tools: bool, model: str, provider: str = ""):
+    """One streamed reply from a brain (Groq and OpenRouter both speak the OpenAI format)."""
+    name = provider or brain_name()
+    key = brain_key(name)
+    if not key:
+        raise RuntimeError(("OPENROUTER_API_KEY" if name == "openrouter" else "GROQ_API_KEY") + " missing in .env")
 
+    on_groq = name == "groq"
+    spend = {}
+    limit = max(600, min(3000, TOKEN_LIMIT - est_tokens(messages))) if on_groq else 3000
     payload = {
         "model": model,
         "messages": messages,
         "temperature": 0.5,
-        "max_completion_tokens": max(600, min(3000, TOKEN_LIMIT - est_tokens(messages))),
+        ("max_completion_tokens" if on_groq else "max_tokens"): limit,
         "stream": True,
     }
-    if model.startswith("openai/gpt-oss"):
+    if not on_groq:
+        payload["usage"] = {"include": True}  # so Karen can show what a request cost
+    if on_groq and model.startswith("openai/gpt-oss"):
         payload["reasoning_effort"] = "low"
-    elif model.startswith("qwen/"):
+    elif on_groq and model.startswith("qwen/"):
         payload["reasoning_format"] = "hidden"
     if use_tools:
         payload["tools"] = TOOLS
         payload["tool_choice"] = "auto"
 
-    r = http.post("https://api.groq.com/openai/v1/chat/completions",
-                  headers={"Authorization": f"Bearer {GROQ_API_KEY}"}, json=payload, stream=True, timeout=(15, 60))
+    if model.startswith("anthropic/"):
+        # Claude can cache the unchanging start of the prompt (these tool definitions and the system
+        # prompt): about a tenth of the price on every later request.
+        payload["cache_control"] = {"type": "ephemeral"}
+    headers = {"Authorization": f"Bearer {key}"}
+    if not on_groq:  # OpenRouter shows these on your activity page
+        headers |= {"HTTP-Referer": "https://github.com/Koushik-Gopathi/ANVI-AI-personal-Assistant-", "X-Title": "Karen"}
+    r = http.post(BRAINS[name]["url"], headers=headers, json=payload, stream=True, timeout=(15, 60))
     if r.status_code in (413, 429, 503) or (r.status_code == 400 and "tool_use_failed" in r.text):
         wait = _retry_after(r) if r.status_code == 429 else 0
         body = r.text[:200]
@@ -567,7 +650,10 @@ def groq_stream(messages: list[dict], use_tools: bool, model: str):
     if not r.ok:
         body = r.text[:400]
         r.close()
-        raise RuntimeError(f"Groq {r.status_code}: {body}")
+        if r.status_code in (401, 402, 403) and name.startswith("openrouter"):
+            raise RuntimeError(f"OpenRouter refused the request ({r.status_code}). Out of credits, or a bad key: "
+                               f"{body}")
+        raise RuntimeError(f"{BRAINS[name]['label']} {r.status_code}: {body}")
 
     r.encoding = "utf-8"
     try:
@@ -578,31 +664,50 @@ def groq_stream(messages: list[dict], use_tools: bool, model: str):
             if data == "[DONE]":
                 break
             chunk = json.loads(data)
+            if chunk.get("usage"):
+                spend.update(chunk["usage"])
             if chunk.get("error"):
-                raise RuntimeError(f"Groq: {chunk['error']}")
+                raise RuntimeError(f"{BRAINS[name]['label']}: {chunk['error']}")
             choices = chunk.get("choices") or []
             if choices:
                 yield choices[0].get("delta") or {}
     finally:
         r.close()
+        if spend.get("cost") is not None:
+            note_spend(model, float(spend["cost"]), spend)
 
 
 _model_free_at: dict[str, float] = {}
+# what today's requests cost (OpenRouter reports it per request; Groq is free)
+spending = {"today": "", "cost": 0.0, "requests": 0, "cached_in": 0, "in": 0, "out": 0}
 
 
-def stream_with_fallback(messages: list[dict], use_tools: bool):
+def note_spend(model: str, cost: float, usage: dict) -> None:
+    today = datetime.now().strftime("%d %b")
+    if spending["today"] != today:
+        spending.update({"today": today, "cost": 0.0, "requests": 0, "cached_in": 0, "in": 0, "out": 0})
+    details = usage.get("prompt_tokens_details") or {}
+    spending["cost"] += cost
+    spending["requests"] += 1
+    spending["cached_in"] += int(details.get("cached_tokens") or 0)
+    spending["in"] += int(usage.get("prompt_tokens") or 0)
+    spending["out"] += int(usage.get("completion_tokens") or 0)
+
+
+def stream_with_fallback(messages: list[dict], use_tools: bool, wants_action: bool = False):
     """Try each model; when all are rate limited, wait (up to 45 s) for the first to free up.
 
     Yields streamed deltas, plus {"_wait": seconds} while waiting.
     """
     network_failures = 0
     for _ in range(4):
-        for model in sorted(MODELS, key=lambda m: _model_free_at.get(m, 0) > time.time()):
+        available = turn_models(wants_action)
+        for provider, model in sorted(available, key=lambda pm: _model_free_at.get(pm[1], 0) > time.time()):
             if _model_free_at.get(model, 0) > time.time():
                 continue
             started = False
             try:
-                for delta in groq_stream(messages, use_tools, model):
+                for delta in groq_stream(messages, use_tools, model, provider):
                     started = True
                     yield delta
                 return
@@ -614,17 +719,21 @@ def stream_with_fallback(messages: list[dict], use_tools: bool):
             except requests.RequestException as e:
                 # slow or dropped connection (the session already retried): try again a couple of times
                 network_failures += 1
-                print(f"  network problem talking to Groq ({type(e).__name__}), attempt {network_failures}")
+                print(f"  network problem talking to the brain ({type(e).__name__}), attempt {network_failures}")
                 if started or network_failures >= 3:
                     raise
                 yield {"_wait": 2 * network_failures, "_why": "reconnecting"}
                 time.sleep(2 * network_failures)
-        wait = min(_model_free_at.values()) - time.time()
+        waits = [_model_free_at[m] for _, m in available if m in _model_free_at]
+        wait = min(waits) - time.time() if waits else 0
         if wait > 45:
             break
         if wait > 0:
             yield {"_wait": wait}
             time.sleep(wait + 0.5)
+    if brain_name().startswith("openrouter"):
+        raise RuntimeError("OpenRouter is busy, rate limited or out of credit. Wait a minute, or switch the brain "
+                           "back to Groq in Settings.")
     raise RuntimeError("I've hit the free Groq limit for now. Give me a minute and ask again.")
 
 
@@ -683,7 +792,8 @@ def run_turn(user_text: str, on_phone: bool = False):
             calls: dict[int, dict] = {}
             content = ""
             hold = wants_action and not executed and not nudged
-            for delta in stream_with_fallback(convo, use_tools=step < MAX_STEPS - 1 and not no_tools):
+            for delta in stream_with_fallback(convo, use_tools=step < MAX_STEPS - 1 and not no_tools,
+                                              wants_action=wants_action or bool(executed)):
                 if me["cancel"].is_set():
                     return
                 if "_wait" in delta:
@@ -1122,9 +1232,11 @@ class ChatIn(BaseModel):
 def health():
     return {
         "status": "ok",
-        "model": GROQ_MODEL,
+        "model": turn_models(wants_action=True)[0][1],
+        "brain": brain_name(),
         "deepgram_key": bool(DEEPGRAM_API_KEY),
         "groq_key": bool(GROQ_API_KEY),
+        "openrouter_key": bool(OPENROUTER_API_KEY),
     }
 
 
@@ -1147,7 +1259,8 @@ def _check_groq():
     if r.status_code != 200:
         return False, f"Groq answered {r.status_code}"
     models = {m["id"] for m in r.json().get("data", [])}
-    missing = [m for m in (GROQ_MODEL, FALLBACK_MODEL, vision.VISION_MODEL) if m not in models]
+    wanted = BRAINS["groq"]["models"] + ([vision.model()] if brain_name() == "groq" else [])
+    missing = [m for m in wanted if m not in models]
     return not missing, "reachable" + (f"; models not available: {', '.join(missing)}" if missing else "")
 
 
@@ -1161,6 +1274,19 @@ def _check_deepgram():
     return r.status_code == 200, "reachable" if r.status_code == 200 else f"Deepgram answered {r.status_code}"
 
 
+def _check_openrouter():
+    r = http.get("https://openrouter.ai/api/v1/credits", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+                 timeout=(6, 12))
+    if r.status_code in (401, 403):
+        return False, "key rejected"
+    if r.status_code != 200:
+        return False, f"answered {r.status_code}"
+    data = r.json().get("data", {})
+    left = float(data.get("total_credits", 0)) - float(data.get("total_usage", 0))
+    free_note = " — with no credit only the free models work (about 50 requests a day)" if left <= 0 else ""
+    return True, f"key works · ${left:.2f} credit left{free_note}"
+
+
 def _check_state():
     store.STATE_DIR.mkdir(parents=True, exist_ok=True)
     probe = store.STATE_DIR / ".write_test"
@@ -1172,8 +1298,10 @@ def _check_state():
 @app.get("/api/diagnostics")
 def diagnostics():
     """Checks for the diagnostics panel: keys, services, storage, phone access."""
-    checks = [("Groq (brain)", _check_groq), ("Deepgram (hearing + voice)", _check_deepgram),
+    checks = [("Groq", _check_groq), ("Deepgram (hearing + voice)", _check_deepgram),
               ("Saved settings/memory", _check_state)]
+    if OPENROUTER_API_KEY:
+        checks.insert(1, ("OpenRouter", _check_openrouter))
     with ThreadPoolExecutor(max_workers=len(checks)) as pool:
         results = list(pool.map(lambda c: _timed_check(*c), checks))
     results += [
@@ -1184,9 +1312,17 @@ def diagnostics():
         {"name": "Phone access", "ok": True,
          "detail": f"https://{phone.lan_ip()}:{PHONE_PORT}" if PHONE_ENABLED else "off (ANVI_PHONE=0)"},
     ]
-    return {"checks": results, "settings": store.settings(), "models": {
-        "chat": GROQ_MODEL, "fallback": FALLBACK_MODEL, "vision": vision.VISION_MODEL,
-        "hearing": f"{STT_MODEL} ({STT_LANGUAGE})"}}
+    chosen = brain()
+    order = turn_models(wants_action=True)
+    spent = dict(spending)
+    if spent["requests"]:
+        saved = spent["cached_in"] / max(1, spent["in"])
+        spent["summary"] = (f"${spent['cost']:.3f} in {spent['requests']} requests today"
+                            f" ({saved:.0%} of the prompt came from the cache)")
+    return {"checks": results, "settings": {**store.settings(), "brain": brain_name()}, "spending": spent, "models": {
+        "chat": f"{order[0][1]} ({chosen['label']})",
+        "fallback": " → ".join(m for _, m in order[1:]) or "-",
+        "vision": vision.model(), "hearing": f"{STT_MODEL} ({STT_LANGUAGE})"}}
 
 
 @app.post("/api/voice-test")
@@ -1278,6 +1414,7 @@ def app_config(request: Request):
         "deepgram": DEEPGRAM_API_KEY or "",
         "tavily": os.getenv("TAVILY_API_KEY", ""),
         "sarvam": SARVAM_API_KEY,
+        "openrouter": OPENROUTER_API_KEY,
         "token": phone.pairing_secret(),
         "lan": f"https://{phone.lan_ip()}:{PHONE_PORT}" if PHONE_ENABLED else "",
         "public": PUBLIC_URL,
@@ -1299,6 +1436,7 @@ def desktop_show(request: Request):
 
 
 class SettingsIn(BaseModel):
+    brain: str | None = None
     wake_word: str | None = None
     voice: str | None = None
     language: str | None = None
@@ -1309,9 +1447,13 @@ class SettingsIn(BaseModel):
 
 @app.get("/api/settings")
 def get_settings():
-    return {"settings": store.settings(), "voices": store.VOICES,
+    return {"settings": {**store.settings(), "brain": brain_name()}, "voices": store.VOICES,
             "languages": {k: v["label"] for k, v in store.LANGUAGES.items()},
-            "indian_voice": "sarvam" if SARVAM_API_KEY else "device"}
+            "indian_voice": "sarvam" if SARVAM_API_KEY else "device",
+            "brains": {k: {"label": v["label"],
+                           "models": [m for _, m in turn_models(wants_action=True)] if k == "mix" else v["models"],
+                           "available": bool(brain_key(k)) and (k != "mix" or bool(GROQ_API_KEY))}
+                       for k, v in BRAINS.items()}}
 
 
 @app.post("/api/settings")
@@ -1421,7 +1563,7 @@ if __name__ == "__main__":
         print(f"  phone (same network) -> https://{phone.lan_ip()}:{PHONE_PORT}   pair via the phone button on the PC")
         if PUBLIC_URL:
             print(f"  phone (anywhere)     -> {PUBLIC_URL}")
-    print(f"  brain: {GROQ_MODEL}   voice: {TTS_VOICE}")
+    print(f"  brain: {brain()['label']} ({', '.join(m for _, m in turn_models(True))})   voice: {TTS_VOICE}")
     print(f"  search: {'Tavily' if os.getenv('TAVILY_API_KEY') else 'Brave API' if os.getenv('BRAVE_API_KEY') else 'keyless (Bing/DuckDuckGo/Brave/Google News)'}")
     print("=" * 60)
     threading.Thread(target=_warm_up, daemon=True).start()

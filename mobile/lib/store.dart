@@ -17,6 +17,7 @@ class Store {
   bool backgroundListening = true; // keeps listening in Recents / after swiping the app away
   bool bargeIn = true; // talking while Karen speaks interrupts her
   bool sounds = true;
+  String brain = 'groq'; // groq | openrouter_free | openrouter
 
   static const voices = {
     'aura-asteria-en': 'Asteria (US, female)',
@@ -32,6 +33,8 @@ class Store {
     'aura-helios-en': 'Helios (UK, male)',
     'aura-zeus-en': 'Zeus (US, male)',
   };
+  static const brains = {'groq': 'Groq (free)', 'openrouter_free': 'OpenRouter (free models)',
+      'mix': 'Smart mix (free chat, Haiku for work)', 'openrouter': 'OpenRouter (paid, best)'};
   static const languages = {'english': 'English', 'telugu': 'Telugu', 'hindi': 'Hindi', 'auto': 'Same as I speak'};
   static const languageCodes = {'english': 'en', 'telugu': 'te', 'hindi': 'hi', 'auto': ''};
 
@@ -54,6 +57,7 @@ class Store {
       backgroundListening = s['background_listening'] ?? backgroundListening;
       bargeIn = s['barge_in'] ?? bargeIn;
       sounds = s['sounds'] ?? sounds;
+      brain = brains.containsKey(s['brain']) ? s['brain'] : brain;
       memories.addAll((data['memories'] as List? ?? []).map((m) => Map<String, dynamic>.from(m)));
       history.addAll((data['history'] as List? ?? []).map((m) => Map<String, dynamic>.from(m)));
     } catch (_) {
@@ -74,6 +78,7 @@ class Store {
         'background_listening': backgroundListening,
         'barge_in': bargeIn,
         'sounds': sounds,
+        'brain': brain,
       },
       'memories': memories,
       'history': history.length > 300 ? history.sublist(history.length - 300) : history,

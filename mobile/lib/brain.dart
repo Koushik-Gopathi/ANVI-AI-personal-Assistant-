@@ -200,7 +200,8 @@ class Brain {
         final calls = <int, Map<String, String>>{};
         var content = '';
         final hold = wantsAction && executed.isEmpty && !nudged;
-        await for (final delta in _streamWithFallback(convo, step < _maxSteps - 1 && !noTools)) {
+        await for (final delta in _streamWithFallback(
+            convo, step < _maxSteps - 1 && !noTools, wantsAction || executed.isNotEmpty)) {
           if (me.cancelled) return;
           if (delta.containsKey('_wait')) {
             yield StatusUpdate('${delta['_why'] ?? 'busy'}, continuing in ${delta['_wait']}s');
@@ -318,15 +319,16 @@ class Brain {
   }
 
   /// Tries each model; when all are rate limited, waits (up to 45 s) for the first to free up.
-  Stream<Map<String, dynamic>> _streamWithFallback(List<Map<String, dynamic>> msgs, bool useTools) async* {
-    final models = [cfg.groqModel, if (cfg.fallbackModel != cfg.groqModel) cfg.fallbackModel];
+  Stream<Map<String, dynamic>> _streamWithFallback(List<Map<String, dynamic>> msgs, bool useTools,
+      bool wantsAction) async* {
+    final models = cfg.turnModels(wantsAction);
     var networkFailures = 0;
     for (var round = 0; round < 6; round++) {
-      for (final model in models) {
+      for (final (provider, model) in models) {
         if ((_freeAt[model] ?? DateTime(2000)).isAfter(DateTime.now())) continue;
         var started = false;
         try {
-          await for (final delta in _stream(msgs, useTools, model)) {
+          await for (final delta in _stream(msgs, useTools, model, provider)) {
             started = true;
             yield delta;
           }
@@ -346,7 +348,8 @@ class Brain {
           break; // retry from the first available model
         }
       }
-      final soonest = models.map((m) => _freeAt[m] ?? DateTime.now()).reduce((a, b) => a.isBefore(b) ? a : b);
+      final soonest =
+          models.map((pm) => _freeAt[pm.$2] ?? DateTime.now()).reduce((a, b) => a.isBefore(b) ? a : b);
       final wait = soonest.difference(DateTime.now());
       if (wait > const Duration(seconds: 45)) break;
       if (wait > Duration.zero) {
@@ -369,17 +372,25 @@ class Brain {
     return Duration(milliseconds: (seconds * 1000).round());
   }
 
-  Stream<Map<String, dynamic>> _stream(List<Map<String, dynamic>> msgs, bool useTools, String model) async* {
-    final budget = (_tokenLimit - _estimate(msgs)).clamp(600, 3000);
-    final request = http.Request('POST', Uri.parse('https://api.groq.com/openai/v1/chat/completions'))
-      ..headers.addAll({'Authorization': 'Bearer ${cfg.groqKey}', 'Content-Type': 'application/json'})
+  Stream<Map<String, dynamic>> _stream(List<Map<String, dynamic>> msgs, bool useTools, String model,
+      String provider) async* {
+    final onGroq = provider == 'groq';
+    final budget = onGroq ? (_tokenLimit - _estimate(msgs)).clamp(600, 3000) : 3000;
+    final request = http.Request('POST', Uri.parse(cfg.urlFor(provider)))
+      ..headers.addAll({
+        'Authorization': 'Bearer ${cfg.keyFor(provider)}',
+        'Content-Type': 'application/json',
+        if (!onGroq) 'X-Title': 'Karen',
+      })
       ..body = jsonEncode({
         'model': model,
         'messages': msgs,
         'temperature': 0.5,
-        'max_completion_tokens': budget,
+        if (onGroq) 'max_completion_tokens': budget else 'max_tokens': budget,
         'stream': true,
-        if (model.startsWith('openai/gpt-oss')) 'reasoning_effort': 'low',
+        if (onGroq && model.startsWith('openai/gpt-oss')) 'reasoning_effort': 'low',
+        // Claude caches the unchanging start of the prompt (tools + system): a tenth of the price after the first call
+        if (model.startsWith('anthropic/')) 'cache_control': {'type': 'ephemeral'},
         if (useTools) 'tools': _tools,
         if (useTools) 'tool_choice': 'auto',
       });
@@ -390,7 +401,12 @@ class Brain {
       if (response.statusCode == 413 || response.statusCode == 503 || body.contains('tool_use_failed')) {
         throw _Retryable('${response.statusCode}', const Duration(seconds: 2));
       }
-      throw AnviError('Groq error ${response.statusCode}');
+      if (response.statusCode == 401 || response.statusCode == 402 || response.statusCode == 403) {
+        throw AnviError(!onGroq
+            ? 'OpenRouter refused the request (${response.statusCode}); out of credit, or a bad key'
+            : 'Groq refused the request (${response.statusCode})');
+      }
+      throw AnviError('${onGroq ? 'Groq' : 'OpenRouter'} error ${response.statusCode}');
     }
     final lines = response.stream.transform(utf8.decoder).transform(const LineSplitter());
     await for (final line in lines) {

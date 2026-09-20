@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -11,6 +12,7 @@ import 'diag.dart';
 import 'orb.dart';
 import 'main.dart';
 import 'phone_skills.dart';
+import 'config.dart';
 import 'store.dart';
 
 const _card = Color(0xFF0B111D);
@@ -123,6 +125,25 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     return Scaffold(
       appBar: AppBar(title: const Text('Settings'), backgroundColor: bg),
       body: ListView(padding: const EdgeInsets.only(bottom: 40), children: [
+        _heading('Brain'),
+        ListTile(
+          title: const Text('Thinks with'),
+          subtitle: Text(
+              widget.anvi.cfg.openrouterKey.isEmpty && store.brain != 'groq'
+                  ? 'No OpenRouter key on this phone — scan the setup code again after adding it on the laptop.'
+                  : (AnviConfig.brains[widget.anvi.cfg.brainName]!['models'] as List).join(', then '),
+              style: _sub),
+          trailing: DropdownButton<String>(
+            value: store.brain,
+            dropdownColor: _card,
+            underline: const SizedBox(),
+            items: [for (final e in Store.brains.entries) DropdownMenuItem(value: e.key, child: Text(e.value))],
+            onChanged: (v) {
+              store.brain = v ?? store.brain;
+              _save();
+            },
+          ),
+        ),
         _heading('Voice'),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -432,6 +453,15 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
         if (r.statusCode == 401) return (false, 'key rejected — scan the setup code again');
         return (r.statusCode == 200, r.statusCode == 200 ? 'reachable' : 'answered ${r.statusCode}');
       }),
+      if (cfg.brainName.startsWith('openrouter'))
+        _timed('OpenRouter', () async {
+          final r = await client.get(Uri.parse('https://openrouter.ai/api/v1/credits'),
+              headers: {'Authorization': 'Bearer ${cfg.openrouterKey}'});
+          if (r.statusCode != 200) return (false, 'answered ${r.statusCode} — key rejected?');
+          final d = jsonDecode(r.body)['data'] ?? {};
+          final left = (d['total_credits'] ?? 0).toDouble() - (d['total_usage'] ?? 0).toDouble();
+          return (true, 'key works, \$${left.toStringAsFixed(2)} credit left');
+        }),
       _timed('Deepgram (hearing + voice)', () async {
         final r = await client.get(Uri.parse('https://api.deepgram.com/v1/projects'),
             headers: {'Authorization': 'Token ${cfg.deepgramKey}'});
@@ -513,6 +543,7 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
         _row('Voice clips', '${Diag.clipsPlayed} played${Diag.clipsFailed > 0 ? ', ${Diag.clipsFailed} failed' : ''}',
             bad: Diag.clipsFailed > 0),
         _row('Interrupting', store.bargeIn ? 'on · ${Diag.bargeIns} interruptions, ${Diag.echoesIgnored} echoes ignored' : 'off'),
+        _row('Brain', '${AnviConfig.brains[anvi.cfg.brainName]!['label']} · ${anvi.cfg.brainModels.first}'),
         _row('Language', '${Store.languages[store.language]}${store.language != 'english' && anvi.cfg.sarvamKey.isEmpty ? ' · phone voice (no Sarvam key)' : ''}'),
         _row('Background listening', store.backgroundListening ? (_background ? 'on, running' : 'on, but NOT running — reopen the app') : 'off',
             bad: store.backgroundListening && !_background),

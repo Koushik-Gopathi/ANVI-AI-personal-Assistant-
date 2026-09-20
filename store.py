@@ -43,7 +43,9 @@ LANGUAGES = {
     "hindi": {"label": "Hindi", "code": "hi", "bcp47": "hi-IN"},
     "auto": {"label": "Same as I speak", "code": "", "bcp47": ""},
 }
+BRAIN_CHOICES = ("groq", "openrouter_free", "mix", "openrouter")
 DEFAULTS = {
+    "brain": "groq",
     "wake_word": "Karen",
     "voice": os.getenv("DEEPGRAM_TTS_VOICE", "aura-asteria-en"),
     "language": "english",
@@ -82,6 +84,10 @@ def update_settings(patch: dict) -> dict:
         if patch["voice"] not in VOICES:
             raise ValueError("unknown voice")
         current["voice"] = patch["voice"]
+    if "brain" in patch:
+        if patch["brain"] not in BRAIN_CHOICES:
+            raise ValueError("unknown brain")
+        current["brain"] = patch["brain"]
     if "language" in patch:
         if patch["language"] not in LANGUAGES:
             raise ValueError("unknown language")

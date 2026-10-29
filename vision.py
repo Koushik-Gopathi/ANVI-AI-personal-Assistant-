@@ -19,7 +19,7 @@ def model() -> str:
     """The vision model of the brain currently chosen in Settings."""
     import main
 
-    return main.brain()["vision"]
+    return main.vision_target()[0]
 
 
 def _jpeg(image, max_side: int = 1600) -> bytes:
@@ -34,7 +34,7 @@ def ask_image(jpeg: bytes, question: str) -> dict:
     """Ask the vision model about one JPEG image."""
     import main
 
-    key, url = main.brain_key(), main.brain()["url"]
+    name, url, key = main.vision_target()
     if not key:
         return {"error": "no API key for the chosen brain (see .env)"}
     content = [
@@ -45,7 +45,7 @@ def ask_image(jpeg: bytes, question: str) -> dict:
         r = http.post(
             url,
             headers={"Authorization": f"Bearer {key}", "X-Title": "Karen"},
-            json={"model": model(), "max_tokens": 700, "temperature": 0.2,
+            json={"model": name, "max_tokens": 700, "temperature": 0.2,
                   "messages": [{"role": "system", "content": PROMPT}, {"role": "user", "content": content}]},
             timeout=(15, 90),
         )

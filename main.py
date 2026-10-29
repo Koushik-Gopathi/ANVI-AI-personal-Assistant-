@@ -122,6 +122,13 @@ def brain() -> dict:
     return BRAINS[brain_name()]
 
 
+def vision_target() -> tuple[str, str, str]:
+    """(model, url, key) for looking at images - the smart mix uses Groq's free vision model."""
+    name = brain_name()
+    provider = "groq" if name in ("groq", "mix") else "openrouter"
+    return BRAINS[name]["vision"], BRAINS[provider]["url"], brain_key(provider)
+
+
 def brain_key(name: str = "") -> str:
     name = name or brain_name()
     return OPENROUTER_API_KEY if name.startswith("openrouter") else (GROQ_API_KEY or "")

@@ -376,7 +376,7 @@ async function handleUtterance(blob) {
   }
 }
 
-async function sendText(text) {
+async function sendText(text, scheduled = false) {
   text = text.trim();
   if (!text) return;
   ensureAudioCtx();
@@ -386,7 +386,7 @@ async function sendText(text) {
   const id = ++turnId;
   setState("thinking");
   try {
-    await converse(text, id);
+    await converse(text, id, scheduled);
   } catch (err) {
     if (err.name === "AbortError" || id !== turnId) return;
     showError(err.message || "connection lost — is main.py running?");
@@ -394,7 +394,7 @@ async function sendText(text) {
   }
 }
 
-async function converse(text, id) {
+async function converse(text, id, scheduled = false) {
   hadExchange = true;
   renderSuggestion();
   duck(false);
@@ -408,7 +408,7 @@ async function converse(text, id) {
   const res = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, scheduled }),
     signal: abortCtl.signal,
   });
   if (!res.ok) {
@@ -1023,6 +1023,41 @@ async function renderMemory() {
   }
 }
 
+async function renderWatchers() {
+  const list = $("watcherList");
+  const { watchers } = await fetch("/api/watchers").then((r) => r.json());
+  list.innerHTML = "";
+  if (!watchers.length) {
+    list.innerHTML = '<li class="empty">Nothing scheduled.</li>';
+    return;
+  }
+  for (const w of watchers) {
+    const li = document.createElement("li");
+    const text = document.createElement("span");
+    const title = document.createElement("b");
+    const detail = document.createElement("small");
+    if (w.type === "alert") {
+      title.textContent = w.say;
+      detail.textContent = `alert · ${w.when}`;
+    } else if (w.type === "routine") {
+      title.textContent = `“${w.does}”`;
+      detail.textContent = `${w.repeats} · next ${w.next}`;
+    } else {
+      title.textContent = w.for;
+      detail.textContent = `checking every ${w.every_minutes} min${w.last_seen ? ` · last: ${w.last_seen}` : ""}`;
+    }
+    text.append(title, detail);
+    const cancel = document.createElement("button");
+    cancel.textContent = "cancel";
+    cancel.addEventListener("click", async () => {
+      await fetch(`/api/watchers/${encodeURIComponent(w.id)}`, { method: "DELETE" });
+      renderWatchers();
+    });
+    li.append(text, cancel);
+    list.appendChild(li);
+  }
+}
+
 async function renderProtocols() {
   const list = $("protocolList");
   const { protocols } = await fetch("/api/protocols").then((r) => r.json());
@@ -1066,6 +1101,7 @@ async function openSettings() {
     $("setBargeIn").checked = s.barge_in !== false;
     $("setSounds").checked = s.sounds !== false;
     updateLangNote();
+    renderWatchers();
     renderProtocols();
     renderMemory();
   } catch (err) {
@@ -1282,6 +1318,72 @@ setInterval(() => {
   }, 650);
 }, 7000);
 suggestEl.textContent = "try: " + SUGGESTIONS[suggestionIndex];
+
+// ---------------------------------------------------------------------------
+// Speaking up on her own: alerts, scheduled routines, watched conditions
+// ---------------------------------------------------------------------------
+const proactive = [];
+let proactiveBusy = false;
+
+function karenIsFree() {
+  return !proactiveBusy && (state === "sleep" || state === "listening") && !(recorder && vad.speaking);
+}
+
+async function sayOnMyOwn(text) {
+  const id = ++turnId;
+  showYou("");
+  showReply(text);
+  clearSteps();
+  sound("wake");
+  try {
+    const data = await fetch("/api/speak", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }) }).then((r) => r.json());
+    if (id !== turnId) return;
+    const queue = (currentQueue = new SpeechQueue(id));
+    if (typeof data.clip === "string") queue.add(data.clip);
+    else if (data.clip && data.clip.say) queue.addSay(data.clip.say, data.clip.lang);
+    queue.streamDone = true;
+    await queue.finished();
+  } catch (_) {
+    // the text is on screen even if the voice failed
+  }
+  if (id !== turnId) return;
+  currentQueue = null;
+  awake ? beginListening() : backToSleepListening();
+}
+
+async function drainProactive() {
+  if (!proactive.length || !karenIsFree()) return;
+  proactiveBusy = true;
+  const ev = proactive.shift();
+  try {
+    ensureAudioCtx();
+    stopRecorder(true);
+    if (ev.kind === "routine") {
+      sound("wake");
+      await sendText(ev.request, true); // as if the user had just asked
+    } else {
+      await sayOnMyOwn(ev.say);
+    }
+  } finally {
+    proactiveBusy = false;
+  }
+}
+
+setInterval(drainProactive, 1000);
+
+function listenForProactive() {
+  const events = new EventSource("/api/events");
+  events.onmessage = (e) => {
+    try {
+      proactive.push(JSON.parse(e.data));
+      drainProactive();
+    } catch (_) {}
+  };
+  // EventSource reconnects by itself if Karen restarts
+}
+
+if (IS_PC_PAGE) listenForProactive();
 
 $("settingsBtn").addEventListener("click", openSettings);
 $("historyBtn").addEventListener("click", openHistory);

@@ -93,6 +93,20 @@ While a task runs, the steps she takes appear above the reply (✓ done, ? waiti
 
 Only paired devices can use Karen: the QR code carries a secret stored as a cookie on the phone. Delete `.anvi\pairing_secret` and restart to unpair every device.
 
+## Speaking up on her own
+
+Karen can talk first — reminders, scheduled jobs, and things she keeps an eye on.
+
+| Say | What happens |
+| --- | --- |
+| "Remind me 3 days before my DBMS exam on 20 November" | Works out the date and says it on 17 Nov at 9 AM |
+| "Every night at 10 pm remind me to take my medicine" | A daily spoken reminder |
+| "Every morning at 8 give me my briefing", "at 9 tell me the weather" | Runs the request at that time, as if you'd just asked |
+| "Tell me when the gold rate in Hyderabad drops below 7,000" | Checks with a web search every hour (free model, no credit used) and tells you once |
+| "What's scheduled?", "cancel the medicine reminder" | Lists or cancels |
+
+Everything is saved in `%LOCALAPPDATA%\Karen\watchers.json`, so it survives a restart. Karen only runs while she's open on the laptop: an alert that came due while she was closed is said when she next opens, and a scheduled job that's hours late is skipped rather than run stale. Settings → *Scheduled and watching* lists them all, with cancel buttons.
+
 ## Protocols
 
 Routines you start by saying their name — on the laptop and on the phone.
@@ -140,6 +154,7 @@ phone.py         phone access: LAN HTTPS certificate, QR pairing secret
 desktop.py       Windows desktop app: window, microphone permission, hotkey
 docs.py          read Word/PDF/PowerPoint, create .docx/.pdf, organise folders
 vision.py        screen and image questions (Groq vision model)
+watchers.py      alerts, scheduled routines and watched conditions; the scheduler
 store.py         settings, long-term memory, chat history (%LOCALAPPDATA%\Karen)
 mobile/          Flutter Android app (own agent brain + phone actions + PC tools via /api/tool)
 web/             UI: wake word, voice activity detection, streamed playback, step list, code panel, orb

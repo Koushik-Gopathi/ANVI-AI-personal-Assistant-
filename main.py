@@ -18,7 +18,7 @@ import threading
 import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -41,6 +41,7 @@ import phone  # noqa: E402
 import search  # noqa: E402
 import store  # noqa: E402
 import vision  # noqa: E402
+import watchers  # noqa: E402
 import weather  # noqa: E402
 from net import friendly_error, http  # noqa: E402
 
@@ -319,10 +320,11 @@ TOOLS = [
            "times": _num("repeat count")}, ("keys",)),
     _tool("get_clipboard", "Read text on the clipboard."),
     _tool("set_clipboard", "Put text on the clipboard.", {"text": _str("text")}, ("text",)),
-    _tool("set_reminder", "Show a reminder popup on the PC after some minutes.",
+    _tool("set_reminder", "Remind the user after some minutes: Karen says it out loud (saved, so it survives a "
+          "restart). For a date and time, or anything that repeats, use schedule.",
           {"minutes": _num("minutes from now (0.5 = 30 seconds)"), "message": _str("reminder text")},
           ("minutes", "message")),
-    _tool("list_reminders", "List pending reminders."),
+    _tool("list_reminders", "List pending reminders, alerts, scheduled routines and watches."),
     _tool("set_volume", "Set the PC volume level (0-100) or action.",
           {"level": {"type": "integer", "description": "0-100"}, "action": {"type": "string", "enum": ["up", "down", "mute"]}}),
     _tool("media_control", "Play/pause, next, previous or stop music and videos.",
@@ -348,6 +350,29 @@ TOOLS = [
     _tool("run_protocol", "Start a saved protocol. Returns its steps; then do every step, in order, with your "
           "tools, and finish with one sentence on what was done.", {"name": _str("protocol name")}, ("name",)),
     _tool("list_protocols", "List the saved protocols and their steps."),
+    # watchers: Karen speaks up on her own
+    _tool("schedule", "Speak up later, once or on repeat. Use 'say' for fixed words, like a reminder ('take your "
+          "medicine', 'your exam is in 3 days'). Use 'do' for anything that must be looked up or done at that time, "
+          "as if the user asked then ('tell me the weather', 'give me my morning briefing', 'a fun fact', 'night "
+          "mode'). Give one of at / daily_at / every_minutes. Work out exact dates from today's date: 'remind me 3 "
+          "days before my exam on 20 November' -> say 'Your exam is in 3 days', at 2026-11-17 09:00. Saved, so it "
+          "survives a restart; runs while Karen is open, and anything missed is said when she next opens.",
+          {"say": _str("fixed words to say, for a reminder"),
+           "do": _str("what the user would ask at that time, to be looked up or done then"),
+           "at": _str("one time: local YYYY-MM-DD HH:MM, or HH:MM for the next time that comes"),
+           "daily_at": _str("every day at HH:MM, 24-hour"),
+           "every_minutes": _num("repeat every N minutes")}),
+    _tool("watch_for", "Keep checking something and speak up when it becomes true: 'tell me when the gold rate in "
+          "Hyderabad drops below 7000', 'tell me when the JNTU results are out'. Karen checks on a timer with a web "
+          "search or a web page, and tells the user once. Checks run while Karen is open.",
+          {"condition": _str("what must be true, precise and checkable, with numbers and units, e.g. '22 carat gold "
+                             "in Hyderabad costs less than Rs 7,000 per gram'"),
+           "check": _str("a web search query, or a page URL, that shows the current value"),
+           "every_minutes": _num("how often to check, 15 to 1440; default 60"),
+           "message": _str("optional: what to say when it happens")}, ("condition", "check")),
+    _tool("list_watchers", "List upcoming alerts, scheduled routines and things being watched."),
+    _tool("cancel_watcher", "Cancel an alert, routine or watch.", {"what": _str("its id, or words from it")},
+          ("what",)),
     _tool("delete_protocol", "Delete a saved protocol (asks first).", {"name": _str("protocol name")}, ("name",)),
 ]
 
@@ -363,6 +388,61 @@ def run_protocol(name: str) -> dict:
                            "until all steps are done: no 'now I will' narration. If a step fails, try another "
                            "way once, then move on. Finish with one sentence saying what was done, and anything "
                            "that failed."}
+
+
+def _judge(prompt: str) -> str:
+    """One short answer from a free model (condition checks shouldn't spend credit)."""
+    if GROQ_API_KEY:
+        url, key, model = BRAINS["groq"]["url"], GROQ_API_KEY, FALLBACK_MODEL
+    else:
+        url, key, model = BRAINS["openrouter_free"]["url"], OPENROUTER_API_KEY, BRAINS["openrouter_free"]["models"][0]
+    payload = {"model": model, "temperature": 0, "messages": [{"role": "user", "content": prompt}],
+               ("max_completion_tokens" if "groq" in url else "max_tokens"): 400}
+    if model.startswith("openai/gpt-oss") and "groq" in url:
+        payload["reasoning_effort"] = "low"
+    r = http.post(url, headers={"Authorization": f"Bearer {key}"}, json=payload, timeout=(15, 60))
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"].get("content") or ""
+
+
+def check_condition(w: dict) -> tuple[bool, str]:
+    """Look the value up and decide whether the watched condition is true right now."""
+    check = w["check"]
+    if re.match(r"^https?://", check):
+        data = search._relevant_extract(check, w["condition"]) or ""
+    else:
+        found = search.web_search(check)
+        data = json.dumps(found.get("results", found), ensure_ascii=False)
+    if not data.strip():
+        return False, "couldn't read anything to check"
+    answer = _judge(
+        f"Today is {datetime.now():%A %d %B %Y, %I:%M %p}.\n"
+        f"Condition: {w['condition']}\n\nData found just now:\n{data[:5000]}\n\n"
+        "Using only this data, is the condition true right now? If the data doesn't clearly show it, it's false. "
+        "Prices, rates, scores and weather must be from today or yesterday to count; older figures mean false. "
+        'Reply with only JSON: {"met": true or false, "detail": "the key current value or fact, one short sentence"}')
+    m = re.search(r"\{.*\}", answer, re.S)
+    try:
+        verdict = json.loads(m.group(0)) if m else {}
+    except json.JSONDecodeError:
+        verdict = {}
+    return bool(verdict.get("met")), str(verdict.get("detail", ""))[:240]
+
+
+def _popup(title: str, message: str) -> None:
+    import winsound
+
+    winsound.MessageBeep(winsound.MB_ICONASTERISK)
+    agent._user32.MessageBoxW(None, message, title, 0x40 | 0x1000 | 0x10000)
+
+
+def set_reminder(minutes: float, message: str) -> dict:
+    """Short reminders are alerts too: spoken, saved, and listed with everything else."""
+    minutes = float(minutes)
+    if not 0 < minutes <= 7 * 24 * 60:
+        return {"error": "a reminder must be between a few seconds and 7 days away; use schedule for a date"}
+    at = datetime.now() + timedelta(minutes=minutes)
+    return watchers.add_alert(message, at.strftime("%Y-%m-%d %H:%M:%S"))
 
 
 def list_protocols() -> dict:
@@ -393,7 +473,7 @@ def daily_briefing() -> dict:
         out["top_news"] = [a["headline"] for a in search.get_news()["articles"][:5]]
     except Exception as e:  # noqa: BLE001
         out["top_news"] = f"unavailable ({e})"
-    out["reminders"] = agent.list_reminders()["reminders"]
+    out["reminders"] = watchers.list_all()["watchers"]
     out["remembered"] = [m["fact"] for m in store.memories()[-15:]]
     out["how_to_answer"] = ("A warm spoken briefing under 90 words: greeting, weather, 2-3 headlines, and any "
                             "reminders or remembered dates coming up soon.")
@@ -415,7 +495,7 @@ TOOL_FUNCS = {
     "open_app": pc.open_app, "close_app": pc.close_app, "open_website": pc.open_website,
     "play_youtube": pc.play_youtube, "list_windows": agent.list_windows, "focus_window": agent.focus_window,
     "type_text": agent.type_text, "press_keys": agent.press_keys, "get_clipboard": agent.get_clipboard,
-    "set_clipboard": agent.set_clipboard, "set_reminder": agent.set_reminder, "list_reminders": agent.list_reminders,
+    "set_clipboard": agent.set_clipboard, "set_reminder": set_reminder, "list_reminders": watchers.list_all,
     "set_volume": pc.set_volume, "media_control": pc.media_control, "take_screenshot": pc.take_screenshot,
     "lock_pc": pc.lock_pc, "power_action": power_action,
     "read_document": docs.read_document, "create_document": docs.create_document,
@@ -423,6 +503,8 @@ TOOL_FUNCS = {
     "daily_briefing": daily_briefing, "look_at_screen": vision.look_at_screen,
     "describe_image": vision.describe_image, "save_protocol": store.save_protocol, "run_protocol": run_protocol,
     "list_protocols": list_protocols, "delete_protocol": delete_protocol,
+    "schedule": watchers.schedule, "watch_for": watchers.add_condition,
+    "list_watchers": watchers.list_all, "cancel_watcher": watchers.cancel,
 }
 TOOL_PARAMS = {t["function"]["name"]: set(t["function"]["parameters"]["properties"]) for t in TOOLS}
 # tools that return {"needs_confirmation"} until called again after the user says yes
@@ -446,6 +528,10 @@ TOOL_STATUS = {
     "forget": lambda a: "forgetting that",
     "daily_briefing": lambda a: "getting your briefing",
     "save_protocol": lambda a: f"saving protocol: {a.get('name', '')}",
+    "schedule": lambda a: "scheduling it",
+    "watch_for": lambda a: f"watching for: {_short(a.get('condition', ''), 40)}",
+    "list_watchers": lambda a: "checking what's scheduled",
+    "cancel_watcher": lambda a: "cancelling it",
     "run_protocol": lambda a: f"starting {a.get('name', 'protocol')}",
     "list_protocols": lambda a: "checking your protocols",
     "delete_protocol": lambda a: f"deleting protocol: {a.get('name', '')}",
@@ -494,6 +580,8 @@ def run_tool(name: str, args: dict, ctx: dict) -> dict:
     # keep only arguments the tool declares: models send empty strings and junk keys like {"": {}}
     allowed = TOOL_PARAMS.get(name, set())
     args = {k: v for k, v in args.items() if k in allowed and v not in (None, "")}
+    if ctx.get("scheduled") and name in SCHEDULING_TOOLS:
+        return {"error": "This is already a scheduled run; don't schedule anything. Just do the request now."}
     guard = EXPLICIT_ONLY.get(name)
     if guard and not guard.search(ctx.get("intent_text") or ctx["user_text"]):
         return {"error": "Not done: the user did not ask for this. Only use this tool when explicitly asked."}
@@ -796,7 +884,11 @@ def stream_with_fallback(messages: list[dict], use_tools: bool, wants_action: bo
 
 ACTION_REQUEST = re.compile(
     r"\b(delete|remove|create|make|open|close|run|install|uninstall|move|copy|rename|write|save|send|type|set|"
-    r"start|stop|turn|change|download|lock|shut|restart|play|pause|clean|zip|organi[sz]e|add|put|kill)\b", re.I)
+    r"start|stop|turn|change|download|lock|shut|restart|play|pause|clean|zip|organi[sz]e|add|put|kill|"
+    # scheduling: these need a tool call, not an answer now
+    r"remind|alert|notify|schedule|watch|cancel|"
+    r"(?:tell|let) me (?:when|if|at)|keep (?:an )?eye|every (?:day|morning|evening|night|week|hour|\d+)|"
+    r"at \d{1,2}(?::\d{2}|\s*(?:am|pm))|tomorrow at|tonight at)\b", re.I)
 CLAIMS_DONE = re.compile(
     r"\b(done|deleted|removed|created|made|opened|closed|ran|installed|moved|copied|renamed|written|wrote|saved|"
     r"sent|typed|started|stopped|turned|changed|downloaded|locked|playing|paused|cleaned|zipped|added|killed|"
@@ -814,7 +906,10 @@ def _call_key(call: dict) -> tuple[str, str]:
 _active_turn: dict = {}
 
 
-def run_turn(user_text: str, on_phone: bool = False):
+SCHEDULING_TOOLS = {"schedule", "watch_for", "set_reminder"}
+
+
+def run_turn(user_text: str, on_phone: bool = False, scheduled: bool = False):
     """Yield ("text", delta), ("tool", name, args), ("step", summary) and ("status", text) events."""
     global _turn_counter, _active_turn
     me = {"cancel": threading.Event(), "closed": False}
@@ -845,6 +940,12 @@ def run_turn(user_text: str, on_phone: bool = False):
         ctx["intent_text"] += "\n" + "\n".join(p["steps"])
         ctx["max_steps"] = min(32, max(ctx["max_steps"], MAX_STEPS + len(p["steps"]) * 2))
 
+    if scheduled:
+        # a routine firing: the user asked for this earlier; do it, don't schedule it again
+        ctx["scheduled"] = True
+        convo.append({"role": "system", "content": (
+            "This request was started automatically by a routine the user scheduled earlier. Just do it now and "
+            "answer; don't set up any alert, routine or reminder.")})
     triggered = store.protocol_in(user_text)
     if triggered:
         start_protocol(triggered)
@@ -1114,7 +1215,7 @@ class SpeechStream:
                 print("  TTS failed:", e)
 
 
-def chat_events(text: str, speak: bool, on_phone: bool = False):
+def chat_events(text: str, speak: bool, on_phone: bool = False, scheduled: bool = False):
     def event(**payload) -> str:
         return json.dumps(payload, ensure_ascii=False) + "\n"
 
@@ -1143,7 +1244,7 @@ def chat_events(text: str, speak: bool, on_phone: bool = False):
 
     def produce():
         try:
-            for item in run_turn(text, on_phone):
+            for item in run_turn(text, on_phone, scheduled):
                 if stop.is_set():
                     break
                 events.put(item)
@@ -1304,6 +1405,7 @@ def api_error(e: Exception) -> JSONResponse:
 class ChatIn(BaseModel):
     text: str
     speak: bool = True
+    scheduled: bool = False  # sent by the window when a scheduled routine fires
 
 
 @app.get("/api/health")
@@ -1439,7 +1541,8 @@ def api_chat(body: ChatIn, request: Request):
     if not text:
         return JSONResponse({"error": "empty message"}, status_code=400)
     return StreamingResponse(
-        chat_events(text, body.speak and store.settings()["speak_replies"], on_phone=not is_local(request)),
+        chat_events(text, body.speak and store.settings()["speak_replies"], on_phone=not is_local(request),
+                    scheduled=body.scheduled),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
@@ -1551,6 +1654,58 @@ def get_history():
 def delete_history():
     store.clear_history()
     return {"ok": True}
+
+
+@app.on_event("startup")
+def _start_watchers():
+    watchers.start(check_condition, _popup)
+
+
+@app.get("/api/events")
+def api_events():
+    """Things Karen says on her own (alerts, routines, watches), as server-sent events."""
+    q = watchers.subscribe()
+
+    def stream():
+        try:
+            yield ": connected\n\n"
+            while True:
+                try:
+                    event = q.get(timeout=15)
+                except queue.Empty:
+                    yield ": keep-alive\n\n"
+                    continue
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        finally:
+            watchers.unsubscribe(q)
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+
+class SpeakIn(BaseModel):
+    text: str
+
+
+@app.post("/api/speak")
+def api_speak(body: SpeakIn):
+    """Karen's voice for a sentence she says on her own."""
+    if not store.settings()["speak_replies"]:
+        return {"clip": None}
+    try:
+        return {"clip": synthesize(clean_for_speech(body.text))}
+    except Exception as e:  # noqa: BLE001
+        return api_error(e)
+
+
+@app.get("/api/watchers")
+def get_watchers():
+    return watchers.list_all()
+
+
+@app.delete("/api/watchers/{wid}")
+def delete_watcher(wid: str):
+    return watchers.cancel(wid)
 
 
 @app.get("/api/protocols")

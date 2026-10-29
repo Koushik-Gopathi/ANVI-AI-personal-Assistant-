@@ -1,10 +1,13 @@
 package com.koushik.anvi
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.OpenableColumns
+import android.service.notification.NotificationListenerService
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.FlutterEngineCache
@@ -62,6 +65,9 @@ class MainActivity : FlutterActivity() {
                         keepAlive = call.arguments == true
                         result.success(null)
                     }
+                    // Android often leaves the notification listener unbound after a reinstall, even
+                    // though the permission is still granted: ask it to bind again.
+                    "rebindNotifications" -> result.success(rebindNotificationListener())
                     else -> result.notImplemented()
                 }
             }
@@ -79,6 +85,18 @@ class MainActivity : FlutterActivity() {
         val shared = readShare(intent) ?: return
         pending = null
         channel?.invokeMethod("shared", shared)
+    }
+
+    private fun rebindNotificationListener(): Boolean = try {
+        val component = ComponentName(this, "notification.listener.service.NotificationListener")
+        packageManager.setComponentEnabledSetting(
+            component, PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.DONT_KILL_APP)
+        packageManager.setComponentEnabledSetting(
+            component, PackageManager.COMPONENT_ENABLED_STATE_ENABLED, PackageManager.DONT_KILL_APP)
+        NotificationListenerService.requestRebind(component)
+        true
+    } catch (e: Exception) {
+        false
     }
 
     private fun readShare(intent: Intent?): Map<String, Any?>? {

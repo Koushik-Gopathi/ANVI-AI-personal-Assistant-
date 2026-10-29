@@ -1023,6 +1023,34 @@ async function renderMemory() {
   }
 }
 
+async function renderProtocols() {
+  const list = $("protocolList");
+  const { protocols } = await fetch("/api/protocols").then((r) => r.json());
+  list.innerHTML = "";
+  if (!protocols.length) {
+    list.innerHTML = '<li class="empty">None yet.</li>';
+    return;
+  }
+  for (const p of protocols) {
+    const li = document.createElement("li");
+    const text = document.createElement("span");
+    const name = document.createElement("b");
+    name.textContent = p.name;
+    const steps = document.createElement("small");
+    steps.textContent = p.steps.join(" → ");
+    text.append(name, steps);
+    const remove = document.createElement("button");
+    remove.textContent = "delete";
+    remove.addEventListener("click", async () => {
+      if (!confirm(`Delete the protocol "${p.name}"?`)) return;
+      await fetch(`/api/protocols/${encodeURIComponent(p.name)}`, { method: "DELETE" });
+      renderProtocols();
+    });
+    li.append(text, remove);
+    list.appendChild(li);
+  }
+}
+
 async function openSettings() {
   settingsModal.hidden = false;
   $("settingsSaved").hidden = true;
@@ -1038,6 +1066,7 @@ async function openSettings() {
     $("setBargeIn").checked = s.barge_in !== false;
     $("setSounds").checked = s.sounds !== false;
     updateLangNote();
+    renderProtocols();
     renderMemory();
   } catch (err) {
     showError("couldn't load settings");

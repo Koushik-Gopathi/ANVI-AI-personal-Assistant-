@@ -30,6 +30,18 @@ void main() {
     expect(Deepgram.cleanForSpeech('ఉష్ణోగ్రత 30°C'), contains('డిగ్రీలు'));
   });
 
+  test('protocols are saved and started by name', () {
+    final store = Store.instance;
+    final saved = store.saveProtocol('Study Mode', ['turn on do not disturb', 'set volume to 20']);
+    expect(saved['steps'], hasLength(2));
+    expect(store.protocolIn('Karen, study mode please')?['name'], 'Study Mode');
+    expect(store.protocolIn('save that as study mode'), isNull);
+    expect(store.protocolIn('studying modes'), isNull);
+    expect(store.saveProtocol('x', ['a'])['error'], isNotNull);
+    expect(store.deleteProtocol('study mode')['deleted'], 'Study Mode');
+    expect(store.protocolIn('study mode'), isNull);
+  });
+
   test('code blocks are split from spoken text', () {
     final (spoken, blocks) = Assistant.splitCode('Here you go.\n```python hello.py\nprint(1)\n```');
     expect(spoken, 'Here you go.');

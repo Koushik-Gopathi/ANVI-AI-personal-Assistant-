@@ -18,6 +18,7 @@ STATE_DIR = Path(os.getenv("KAREN_STATE_DIR") or Path(os.getenv("LOCALAPPDATA", 
 SETTINGS_FILE = STATE_DIR / "settings.json"
 MEMORY_FILE = STATE_DIR / "memory.json"
 HISTORY_FILE = STATE_DIR / "history.jsonl"
+PROTOCOLS_FILE = STATE_DIR / "protocols.json"
 _lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
@@ -136,6 +137,85 @@ def memory_prompt(limit: int = 40) -> str:
     if not items:
         return ""
     return "Things the user asked you to remember: " + "; ".join(f"{m['fact']} (saved {m['added']})" for m in items) + ". "
+
+
+# ---------------------------------------------------------------------------
+# Protocols: named routines ("study mode") the user triggers by saying the name
+# ---------------------------------------------------------------------------
+def _protocol_key(name: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", str(name).lower())).strip()
+
+
+def protocols() -> dict:
+    return _read_json(PROTOCOLS_FILE, {})
+
+
+def save_protocol(name: str, steps) -> dict:
+    key = _protocol_key(name)
+    if not 2 <= len(key) <= 40:
+        return {"error": "a protocol name must be 2-40 letters, like 'study mode'"}
+    if isinstance(steps, str):
+        steps = re.split(r"\s*(?:\n|;|\bthen\b)\s*", steps)
+    steps = [re.sub(r"\s+", " ", str(x)).strip(" .-") for x in steps or []]
+    steps = [x[:200] for x in steps if x][:15]
+    if not steps:
+        return {"error": "a protocol needs at least one step"}
+    with _lock:
+        items = protocols()
+        replaced = key in items
+        items[key] = {"name": str(name).strip(), "steps": steps, "saved": f"{datetime.now():%d %b %Y}",
+                      "runs": items.get(key, {}).get("runs", 0)}
+        _write_json(PROTOCOLS_FILE, items)
+    return {"saved": items[key]["name"], "steps": steps, "replaced": replaced,
+            "how_to_use": f"say '{items[key]['name']}' to run it"}
+
+
+def delete_protocol(name: str) -> dict:
+    key = _protocol_key(name)
+    with _lock:
+        items = protocols()
+        if key not in items:
+            return {"error": f"no protocol called '{name}'", "saved_protocols": [p["name"] for p in items.values()]}
+        removed = items.pop(key)
+        _write_json(PROTOCOLS_FILE, items)
+    return {"deleted": removed["name"]}
+
+
+def get_protocol(name: str) -> dict | None:
+    return protocols().get(_protocol_key(name))
+
+
+def mark_protocol_run(name: str) -> None:
+    key = _protocol_key(name)
+    with _lock:
+        items = protocols()
+        if key in items:
+            items[key]["runs"] = items[key].get("runs", 0) + 1
+            items[key]["last_run"] = f"{datetime.now():%d %b %Y %H:%M}"
+            _write_json(PROTOCOLS_FILE, items)
+
+
+def protocol_in(text: str) -> dict | None:
+    """The protocol a request names ("Karen, study mode please" -> study mode), if any."""
+    words = f" {_protocol_key(text)} "
+    # a request that is about protocols, not one that runs one
+    if re.search(r"\b(save|create|make|add|delete|remove|forget|edit|change|list|what|show)\b", words):
+        return None
+    best = None
+    for p in protocols().values():
+        key = _protocol_key(p["name"])
+        if f" {key} " in words and (best is None or len(key) > len(_protocol_key(best["name"]))):
+            best = p
+    return best
+
+
+def protocol_prompt() -> str:
+    items = protocols()
+    if not items:
+        return ""
+    names = ", ".join(f"'{p['name']}' ({len(p['steps'])} steps)" for p in items.values())
+    return (f"Saved protocols the user triggers by saying their name: {names}. When the user says one, call "
+            "run_protocol and then carry out every step. ")
 
 
 # ---------------------------------------------------------------------------

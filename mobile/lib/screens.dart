@@ -246,6 +246,24 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
             'So Android doesn\'t stop background listening.', () async {
           await BackgroundListening.askBatteryUnrestricted();
         }),
+        _heading('Protocols'),
+        if (store.protocols.isEmpty)
+          const ListTile(
+              title: Text('No protocols yet'),
+              subtitle: Text('Say “save a protocol called study mode: do not disturb on, volume 20”', style: _sub)),
+        for (final p in store.protocols.values.toList())
+          ListTile(
+            dense: true,
+            title: Text('${p['name']}'),
+            subtitle: Text((p['steps'] as List).join(' → '), style: _sub),
+            trailing: IconButton(
+              icon: const Icon(Icons.close, size: 18, color: muted),
+              onPressed: () {
+                store.deleteProtocol('${p['name']}');
+                setState(() {});
+              },
+            ),
+          ),
         _heading('Memory'),
         if (store.memories.isEmpty)
           const ListTile(
@@ -462,6 +480,13 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
           final left = (d['total_credits'] ?? 0).toDouble() - (d['total_usage'] ?? 0).toDouble();
           return (true, 'key works, \$${left.toStringAsFixed(2)} credit left');
         }),
+      _timed('Notifications', () async {
+        if (!await NotificationListenerService.isPermissionGranted()) {
+          return (false, 'access not given - allow it in Permissions above');
+        }
+        if (await PhoneSkills.notificationsWorking()) return (true, 'listener running');
+        return (false, 'access given, but Android has not started the listener - turn it OFF and ON again');
+      }),
       _timed('Deepgram (hearing + voice)', () async {
         final r = await client.get(Uri.parse('https://api.deepgram.com/v1/projects'),
             headers: {'Authorization': 'Token ${cfg.deepgramKey}'});

@@ -118,6 +118,7 @@ class Brain {
         '${languageRules[store.language]}'
         'When the user tells you something to remember, use remember. '
         '${store.memoryPrompt()}'
+        '${store.protocolPrompt()}'
         'Current local date and time: $time. User\'s location: $location.';
   }
 
@@ -189,19 +190,39 @@ class Brain {
     final convo = await _conversation();
     final turnStart = convo.length - 1;
     final executed = <String>{};
-    final wantsAction = _actionRequest.hasMatch(userText);
+    var maxSteps = _maxSteps;
+    void startProtocol(Map p) {
+      // long protocols get the steps they need
+      maxSteps = (_maxSteps + (p['steps'] as List).length * 2).clamp(_maxSteps, 32);
+    }
+
+    final triggered = Store.instance.protocolIn(userText);
+    if (triggered != null) {
+      startProtocol(triggered);
+      final mentionsPc = (triggered['steps'] as List).any((x) => _pcRequest.hasMatch('$x'));
+      if (mentionsPc && cfg.hasPc && !_usePc) {
+        _usePc = true;
+        await tools.pc.refreshToolDefs();
+      }
+      convo.add({
+        'role': 'system',
+        'content': "The user triggered the protocol '${triggered['name']}'. Call run_protocol with that name, then "
+            'carry out every step.',
+      });
+    }
+    final wantsAction = _actionRequest.hasMatch(userText) || triggered != null;
     var finalText = '';
     var noTools = false;
     var nudged = false;
 
     try {
-      for (var step = 0; step < _maxSteps; step++) {
+      for (var step = 0; step < maxSteps; step++) {
         _compact(convo, turnStart);
         final calls = <int, Map<String, String>>{};
         var content = '';
         final hold = wantsAction && executed.isEmpty && !nudged;
         await for (final delta in _streamWithFallback(
-            convo, step < _maxSteps - 1 && !noTools, wantsAction || executed.isNotEmpty)) {
+            convo, step < maxSteps - 1 && !noTools, wantsAction || executed.isNotEmpty)) {
           if (me.cancelled) return;
           if (delta.containsKey('_wait')) {
             yield StatusUpdate('${delta['_why'] ?? 'busy'}, continuing in ${delta['_wait']}s');
@@ -270,6 +291,7 @@ class Brain {
           if (me.cancelled) return; // interrupted: don't start more actions
           yield ToolStarted(c['name']!, args);
           final result = await tools.run(c['name']!, args, userText, _turn, '$lastReply');
+          if (c['name'] == 'run_protocol' && result['steps'] is List) startProtocol(result);
           final step = (toolStatus(c['name']!, args), _outcome(c['name']!, result));
           steps.add(step);
           if (tools.pc.toolDefs.any((t) => t['function']['name'] == c['name'])) usedPc = true;

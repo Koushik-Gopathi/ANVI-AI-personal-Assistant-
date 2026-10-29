@@ -41,6 +41,7 @@ class Store {
   // --- memory & history ----------------------------------------------------------
   final memories = <Map<String, dynamic>>[]; // {fact, added}
   final history = <Map<String, dynamic>>[]; // {at, you, karen, steps}
+  final protocols = <String, Map<String, dynamic>>{}; // key -> {name, steps, saved, runs}
 
   File? _file;
 
@@ -60,6 +61,7 @@ class Store {
       brain = brains.containsKey(s['brain']) ? s['brain'] : brain;
       memories.addAll((data['memories'] as List? ?? []).map((m) => Map<String, dynamic>.from(m)));
       history.addAll((data['history'] as List? ?? []).map((m) => Map<String, dynamic>.from(m)));
+      (data['protocols'] as Map? ?? {}).forEach((k, v) => protocols['$k'] = Map<String, dynamic>.from(v as Map));
     } catch (_) {
       // first run or unreadable file: keep defaults
     }
@@ -82,6 +84,7 @@ class Store {
       },
       'memories': memories,
       'history': history.length > 300 ? history.sublist(history.length - 300) : history,
+      'protocols': protocols,
     }));
     await tmp.rename(file.path);
   }
@@ -115,6 +118,74 @@ class Store {
     memories.removeWhere((m) => removed.contains('${m['fact']}'));
     save();
     return {'forgot': removed};
+  }
+
+  // --- protocols: named routines ("study mode") started by saying the name ---------------
+  static String _protocolKey(String name) =>
+      name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9 ]'), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+
+  Map<String, dynamic> saveProtocol(String name, Object? rawSteps) {
+    final key = _protocolKey(name);
+    if (key.length < 2 || key.length > 40) return {'error': "a protocol name must be 2-40 letters, like 'study mode'"};
+    final parts = rawSteps is List
+        ? rawSteps.map((x) => '$x')
+        : '${rawSteps ?? ''}'.split(RegExp(r'\s*(?:\n|;|\bthen\b)\s*'));
+    final steps = parts
+        .map((x) => x.replaceAll(RegExp(r'\s+'), ' ').trim())
+        .where((x) => x.isNotEmpty)
+        .map((x) => x.length > 200 ? x.substring(0, 200) : x)
+        .take(15)
+        .toList();
+    if (steps.isEmpty) return {'error': 'a protocol needs at least one step'};
+    final replaced = protocols.containsKey(key);
+    final now = DateTime.now();
+    protocols[key] = {
+      'name': name.trim(),
+      'steps': steps,
+      'saved': '${now.day}/${now.month}/${now.year}',
+      'runs': protocols[key]?['runs'] ?? 0,
+    };
+    save();
+    return {'saved': name.trim(), 'steps': steps, 'replaced': replaced, 'how_to_use': "say '${name.trim()}' to run it"};
+  }
+
+  Map<String, dynamic> deleteProtocol(String name) {
+    final removed = protocols.remove(_protocolKey(name));
+    if (removed == null) {
+      return {'error': "no protocol called '$name'", 'saved_protocols': [for (final p in protocols.values) p['name']]};
+    }
+    save();
+    return {'deleted': removed['name']};
+  }
+
+  Map<String, dynamic>? protocol(String name) => protocols[_protocolKey(name)];
+
+  void markProtocolRun(String name) {
+    final p = protocol(name);
+    if (p == null) return;
+    p['runs'] = (p['runs'] ?? 0) + 1;
+    save();
+  }
+
+  /// The protocol a request names ("Karen, study mode please" -> study mode), if any.
+  Map<String, dynamic>? protocolIn(String text) {
+    final words = ' ${_protocolKey(text)} ';
+    if (RegExp(r'\b(save|create|make|add|delete|remove|forget|edit|change|list|what|show)\b').hasMatch(words)) {
+      return null; // talking about protocols, not starting one
+    }
+    Map<String, dynamic>? best;
+    for (final p in protocols.values) {
+      final key = _protocolKey('${p['name']}');
+      if (words.contains(' $key ') && (best == null || key.length > _protocolKey('${best['name']}').length)) best = p;
+    }
+    return best;
+  }
+
+  String protocolPrompt() {
+    if (protocols.isEmpty) return '';
+    final names = protocols.values.map((p) => "'${p['name']}' (${(p['steps'] as List).length} steps)").join(', ');
+    return 'Saved protocols the user triggers by saying their name: $names. When the user says one, call run_protocol '
+        'and then carry out every step. ';
   }
 
   String memoryPrompt() {

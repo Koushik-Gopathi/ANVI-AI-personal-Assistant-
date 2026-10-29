@@ -93,6 +93,16 @@ While a task runs, the steps she takes appear above the reply (✓ done, ? waiti
 
 Only paired devices can use Karen: the QR code carries a secret stored as a cookie on the phone. Delete `.anvi\pairing_secret` and restart to unpair every device.
 
+## Protocols
+
+Routines you start by saying their name — on the laptop and on the phone.
+
+- **Create one:** "save a protocol called study mode: close YouTube, open my notes folder, volume 20, remind me in 50 minutes to take a break" — or do the steps once and say "save that as study mode".
+- **Run it:** "study mode" (or "Karen, night mode please"). Karen carries out every step with her normal tools, and reports once at the end.
+- **Manage them:** "list my protocols", "delete night mode", or Settings → Protocols.
+
+Steps go through the same safety checks as anything else, and steps you saved count as your request — so a protocol can close apps without you saying "close" again. Saved in `%LOCALAPPDATA%\Karen\protocols.json` on the laptop and in the app's own storage on the phone.
+
 ## The brain (which AI thinks)
 
 Settings → **Brain**:

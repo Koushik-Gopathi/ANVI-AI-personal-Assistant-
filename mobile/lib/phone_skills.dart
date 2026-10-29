@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:android_intent_plus/android_intent.dart';
 import 'package:battery_plus/battery_plus.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_contacts/flutter_contacts.dart' show ContactProperty, FlutterContacts;
 import 'package:flutter_volume_controller/flutter_volume_controller.dart';
 import 'package:installed_apps/installed_apps.dart';
@@ -61,6 +62,21 @@ class PhoneSkills {
     _tool('remember', 'Save a fact the user wants you to remember permanently (people, dates, preferences).',
         {'fact': _str('the fact as a full sentence')}, ['fact']),
     _tool('forget', 'Delete a remembered fact.', {'fact': _str('words from the fact')}, ['fact']),
+    _tool(
+        'save_protocol',
+        "Save a protocol: a named routine the user can start later just by saying its name, like 'study mode' or "
+            "'night mode'. Use for 'save that as X', 'create a protocol', 'whenever I say X, do Y'. Each step is one "
+            "short instruction you can do with your tools, in order, e.g. 'turn on do not disturb', 'set volume to 20', "
+            "'open Spotify', 'set an alarm for 6:30'.",
+        {
+          'name': _str("short name the user will say, e.g. 'study mode'"),
+          'steps': {'type': 'array', 'items': {'type': 'string'}, 'description': 'the steps, in order'},
+        },
+        ['name', 'steps']),
+    _tool('run_protocol', 'Start a saved protocol. Returns its steps; then do every step in order with your tools.',
+        {'name': _str('protocol name')}, ['name']),
+    _tool('list_protocols', 'List the saved protocols and their steps.'),
+    _tool('delete_protocol', 'Delete a saved protocol.', {'name': _str('protocol name')}, ['name']),
     _tool('daily_briefing', "Morning/daily briefing data: today's calendar, battery, and remembered dates. Use for "
         "'good morning', 'brief me', 'what's my day'; also call get_weather and get_news for the full briefing."),
   ];
@@ -80,6 +96,10 @@ class PhoneSkills {
         'remember' => 'remembering that',
         'forget' => 'forgetting that',
         'daily_briefing' => 'getting your briefing',
+        'save_protocol' => 'saving protocol: ${args['name'] ?? ''}',
+        'run_protocol' => 'starting ${args['name'] ?? 'protocol'}',
+        'list_protocols' => 'checking your protocols',
+        'delete_protocol' => 'deleting protocol: ${args['name'] ?? ''}',
         _ => name.replaceAll('_', ' '),
       };
 
@@ -100,6 +120,10 @@ class PhoneSkills {
       'remember' => Future.value(Store.instance.remember(arg('fact'))),
       'forget' => Future.value(Store.instance.forget(arg('fact'))),
       'daily_briefing' => briefing(),
+      'save_protocol' => Future.value(Store.instance.saveProtocol(arg('name'), args['steps'])),
+      'run_protocol' => Future.value(runProtocol(arg('name'))),
+      'list_protocols' => Future.value(listProtocols()),
+      'delete_protocol' => Future.value(Store.instance.deleteProtocol(arg('name'))),
       _ => Future.value({'error': 'unknown phone tool $name'}),
     };
   }
@@ -152,6 +176,27 @@ class PhoneSkills {
       _recent.add(e);
       if (_recent.length > 60) _recent.removeAt(0);
     });
+    await _rebind(); // after a reinstall the permission survives but the listener often isn't bound
+  }
+
+  /// Ask Android to bind the notification listener again (see MainActivity).
+  static Future<void> _rebind() async {
+    try {
+      await const MethodChannel('karen/share').invokeMethod('rebindNotifications');
+      await Future.delayed(const Duration(milliseconds: 1200));
+    } catch (_) {}
+  }
+
+  /// Whether Android has actually started the listener, not just granted the permission.
+  static Future<bool> notificationsWorking() async {
+    if (!await NotificationListenerService.isPermissionGranted()) return false;
+    if (_recent.isNotEmpty) return true;
+    try {
+      await NotificationListenerService.getActiveNotifications();
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   static const _appNames = {
@@ -167,7 +212,18 @@ class PhoneSkills {
       return {'error': "notification access is off. Tell the user to open Karen's settings and allow notification access."};
     }
     await startNotificationListener();
-    final active = await NotificationListenerService.getActiveNotifications();
+    var active = await NotificationListenerService.getActiveNotifications();
+    if (active.isEmpty && _recent.isEmpty) {
+      // the listener is granted but not bound (common right after installing): kick it and retry
+      await _rebind();
+      active = await NotificationListenerService.getActiveNotifications();
+      if (active.isEmpty) {
+        return {
+          'error': 'Android has not started the notification listener yet. Tell the user to open Settings > '
+              'Notification access, turn Karen OFF and ON again, then ask once more.',
+        };
+      }
+    }
     final seen = <String>{};
     final want = app.toLowerCase();
     final items = <Map<String, dynamic>>[];
@@ -278,6 +334,33 @@ class PhoneSkills {
       ),
     );
     return id == null ? {'error': "couldn't add the event"} : {'added': title, 'at': start, 'calendar': primary.name};
+  }
+
+  // --- protocols ------------------------------------------------------------------------------------
+  static Map<String, dynamic> runProtocol(String name) {
+    final p = Store.instance.protocol(name);
+    if (p == null) {
+      return {
+        'error': "no protocol called '$name'",
+        'saved_protocols': [for (final x in Store.instance.protocols.values) x['name']],
+      };
+    }
+    Store.instance.markProtocolRun(name);
+    return {
+      'protocol': p['name'],
+      'steps': p['steps'],
+      'instruction': "Now carry out every step in order using your tools. Don't write anything until all steps are "
+          'done. If a step fails, try another way once, then move on. Finish with one sentence saying what was done '
+          'and anything that failed.',
+    };
+  }
+
+  static Map<String, dynamic> listProtocols() {
+    final items = Store.instance.protocols.values;
+    if (items.isEmpty) return {'protocols': [], 'note': "none saved yet; the user can say 'save that as study mode'"};
+    return {
+      'protocols': [for (final p in items) {'name': p['name'], 'steps': p['steps'], 'runs': p['runs'] ?? 0}],
+    };
   }
 
   // --- briefing -------------------------------------------------------------------------------------

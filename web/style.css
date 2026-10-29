@@ -806,3 +806,22 @@ body.code-open .corner-row {
 .diag-checks small {
   color: var(--muted);
 }
+
+/* ---------- protocols ---------- */
+.protocol-list span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.protocol-list b {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.protocol-list small {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}

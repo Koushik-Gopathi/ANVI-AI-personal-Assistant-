@@ -6,6 +6,7 @@ Run:       python main.py      then open http://127.0.0.1:8000
 """
 
 import asyncio
+import itertools
 import base64
 import json
 import os
@@ -335,7 +336,50 @@ TOOLS = [
     _tool("forget", "Delete a remembered fact.", {"fact": _str("words from the fact to forget")}, ("fact",)),
     _tool("daily_briefing", "Morning/daily briefing: weather, top news, reminders and remembered dates. Use for "
           "'good morning', 'brief me', 'what's my day'."),
+    # protocols: named routines
+    _tool("save_protocol", "Save a protocol: a named routine the user can trigger later just by saying its name, "
+          "like 'study mode' or 'night mode'. Use for 'save that as X', 'create a protocol', 'whenever I say X, do Y'. "
+          "Each step is one short instruction you can carry out with your tools, in order, e.g. 'close YouTube in "
+          "Chrome', 'open the Documents folder', 'set volume to 20', 'remind me in 50 minutes to take a break'. "
+          "When saving what you just did, list those actions as steps.",
+          {"name": _str("short name the user will say, e.g. 'study mode'"),
+           "steps": {"type": "array", "items": {"type": "string"}, "description": "the steps, in order"}},
+          ("name", "steps")),
+    _tool("run_protocol", "Start a saved protocol. Returns its steps; then do every step, in order, with your "
+          "tools, and finish with one sentence on what was done.", {"name": _str("protocol name")}, ("name",)),
+    _tool("list_protocols", "List the saved protocols and their steps."),
+    _tool("delete_protocol", "Delete a saved protocol (asks first).", {"name": _str("protocol name")}, ("name",)),
 ]
+
+
+def run_protocol(name: str) -> dict:
+    p = store.get_protocol(name)
+    if not p:
+        return {"error": f"no protocol called '{name}'",
+                "saved_protocols": [x["name"] for x in store.protocols().values()]}
+    store.mark_protocol_run(p["name"])
+    return {"protocol": p["name"], "steps": p["steps"],
+            "instruction": "Now carry out every step below in order using your tools. Don't write anything "
+                           "until all steps are done: no 'now I will' narration. If a step fails, try another "
+                           "way once, then move on. Finish with one sentence saying what was done, and anything "
+                           "that failed."}
+
+
+def list_protocols() -> dict:
+    items = store.protocols()
+    if not items:
+        return {"protocols": [], "note": "none saved yet; the user can say 'save that as study mode'"}
+    return {"protocols": [{"name": p["name"], "steps": p["steps"], "runs": p.get("runs", 0)}
+                          for p in items.values()]}
+
+
+def delete_protocol(name: str, confirmed: bool = False) -> dict:
+    p = store.get_protocol(name)
+    if not p:
+        return store.delete_protocol(name)
+    if not confirmed:
+        return {"needs_confirmation": True, "will_do": f"delete the protocol '{p['name']}' ({len(p['steps'])} steps)"}
+    return store.delete_protocol(name)
 
 
 def daily_briefing() -> dict:
@@ -377,12 +421,13 @@ TOOL_FUNCS = {
     "read_document": docs.read_document, "create_document": docs.create_document,
     "organize_folder": docs.organize_folder, "remember": store.remember, "forget": store.forget,
     "daily_briefing": daily_briefing, "look_at_screen": vision.look_at_screen,
-    "describe_image": vision.describe_image,
+    "describe_image": vision.describe_image, "save_protocol": store.save_protocol, "run_protocol": run_protocol,
+    "list_protocols": list_protocols, "delete_protocol": delete_protocol,
 }
 TOOL_PARAMS = {t["function"]["name"]: set(t["function"]["parameters"]["properties"]) for t in TOOLS}
 # tools that return {"needs_confirmation"} until called again after the user says yes
 CONFIRMABLE = {"run_command", "write_file", "move_path", "delete_path", "power_action", "create_document",
-               "organize_folder", "close_app"}
+               "organize_folder", "close_app", "delete_protocol"}
 
 
 def _short(value, n: int = 60) -> str:
@@ -400,6 +445,10 @@ TOOL_STATUS = {
     "remember": lambda a: "remembering that",
     "forget": lambda a: "forgetting that",
     "daily_briefing": lambda a: "getting your briefing",
+    "save_protocol": lambda a: f"saving protocol: {a.get('name', '')}",
+    "run_protocol": lambda a: f"starting {a.get('name', 'protocol')}",
+    "list_protocols": lambda a: "checking your protocols",
+    "delete_protocol": lambda a: f"deleting protocol: {a.get('name', '')}",
     "look_at_screen": lambda a: "looking at your screen",
     "describe_image": lambda a: f"looking at {Path(str(a.get('path', 'image'))).name}",
     "speed_test": lambda a: "running a speed test",
@@ -446,7 +495,7 @@ def run_tool(name: str, args: dict, ctx: dict) -> dict:
     allowed = TOOL_PARAMS.get(name, set())
     args = {k: v for k, v in args.items() if k in allowed and v not in (None, "")}
     guard = EXPLICIT_ONLY.get(name)
-    if guard and not guard.search(ctx["user_text"]):
+    if guard and not guard.search(ctx.get("intent_text") or ctx["user_text"]):
         return {"error": "Not done: the user did not ask for this. Only use this tool when explicitly asked."}
     fn = TOOL_FUNCS.get(name)
     if not fn:
@@ -549,6 +598,7 @@ def system_prompt(on_phone: bool = False) -> str:
         "filename on the opening fence line, like ```python hello.py; it is shown on screen, so outside the code "
         "write one short sentence. When they want a file created, use write_file (or create_document for Word/PDF). "
         "When the user tells you something to remember, use remember. "
+        + store.protocol_prompt()
         + LANGUAGE_RULES[settings["language"]]
         + store.memory_prompt()
         + f"User's folders: Desktop {folders['desktop']}, Documents {folders['documents']}, "
@@ -783,7 +833,24 @@ def run_turn(user_text: str, on_phone: bool = False):
         convo = build_convo(on_phone)
     turn_start = len(convo) - 1
     last_reply = next((m["content"] for m in reversed(convo[:-1]) if m["role"] == "assistant"), "")
-    ctx = {"turn": _turn_counter, "user_text": user_text, "last_reply": last_reply}
+    ctx = {"turn": _turn_counter, "user_text": user_text, "last_reply": last_reply, "max_steps": MAX_STEPS}
+    previous_request = next((m["content"] for m in reversed(convo[:-1]) if m["role"] == "user"), "")
+    ctx["intent_text"] = user_text
+    if CONFIRM_RE.search(user_text) and len(user_text.split()) <= 8:
+        ctx["intent_text"] = f"{user_text}\n{previous_request}"  # "yes" answers the earlier request
+
+    def start_protocol(p: dict) -> None:
+        # a protocol the user saved is their own instruction: its steps count as asked-for, and long
+        # protocols get the steps they need
+        ctx["intent_text"] += "\n" + "\n".join(p["steps"])
+        ctx["max_steps"] = min(32, max(ctx["max_steps"], MAX_STEPS + len(p["steps"]) * 2))
+
+    triggered = store.protocol_in(user_text)
+    if triggered:
+        start_protocol(triggered)
+        convo.append({"role": "system", "content": (
+            f"The user triggered the protocol '{triggered['name']}'. Call run_protocol with that name, then carry "
+            "out every step.")})
 
     final = ""
     steps: list[dict] = []
@@ -792,14 +859,16 @@ def run_turn(user_text: str, on_phone: bool = False):
     nudged = False
     # For requests to *do* something, hold back text written before any tool ran:
     # if it claims success without a tool call, it is thrown away and the model is told to act.
-    wants_action = bool(ACTION_REQUEST.search(user_text))
+    wants_action = bool(ACTION_REQUEST.search(user_text)) or bool(triggered)
     try:
-        for step in range(MAX_STEPS):
+        for step in itertools.count():
+            if step >= ctx["max_steps"]:
+                break
             compact_convo(convo, turn_start)
             calls: dict[int, dict] = {}
             content = ""
             hold = wants_action and not executed and not nudged
-            for delta in stream_with_fallback(convo, use_tools=step < MAX_STEPS - 1 and not no_tools,
+            for delta in stream_with_fallback(convo, use_tools=step < ctx["max_steps"] - 1 and not no_tools,
                                               wants_action=wants_action or bool(executed)):
                 if me["cancel"].is_set():
                     return
@@ -858,6 +927,8 @@ def run_turn(user_text: str, on_phone: bool = False):
                     return  # interrupted: don't start more actions
                 yield ("tool", c["name"], args)
                 result = run_tool(c["name"], args, ctx)
+                if c["name"] == "run_protocol" and result.get("steps"):
+                    start_protocol(result)
                 summary = step_summary(c["name"], args, result)
                 steps.append(summary)
                 yield ("step", summary)
@@ -1480,6 +1551,16 @@ def get_history():
 def delete_history():
     store.clear_history()
     return {"ok": True}
+
+
+@app.get("/api/protocols")
+def get_protocols():
+    return list_protocols()
+
+
+@app.delete("/api/protocols/{name}")
+def remove_protocol(name: str):
+    return store.delete_protocol(name)
 
 
 @app.get("/api/memory")

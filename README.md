@@ -95,7 +95,7 @@ Only paired devices can use Karen: the QR code carries a secret stored as a cook
 
 ## Doing things on websites
 
-Karen has her own Chrome window (a separate profile in `%LOCALAPPDATA%\Karenrowser-profile`, so your everyday browser is untouched). You watch every click and can take over at any time.
+Karen has her own Chrome window (a separate profile in `%LOCALAPPDATA%\Karen\browser-profile`, so your everyday browser is untouched). You watch every click and can take over at any time.
 
 - "Search amazon.in for a laptop stand under 1,000 and tell me the top three with prices"
 - "Open wikipedia, search for Golconda Fort and tell me who built it"

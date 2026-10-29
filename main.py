@@ -35,6 +35,7 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 import agent  # noqa: E402
+import browser  # noqa: E402
 import docs  # noqa: E402
 import pc  # noqa: E402
 import phone  # noqa: E402
@@ -304,7 +305,8 @@ TOOLS = [
           ("name",)),
     _tool("close_app", "Close an app when the user says close/quit it; force=true kills a frozen app (asks first).",
           {"name": _str("app name"), "force": _bool("force-close a frozen/unresponsive app")}, ("name",)),
-    _tool("open_website", "Open a website or a Google search in a browser.",
+    _tool("open_website", "Just open a website or a Google search in the user's own browser, for them to look at. "
+          "To do something on a website for the user, use browse_open instead.",
           {"url_or_query": _str("URL/domain or search text"),
            "browser": _str("chrome, edge, firefox or brave when the user names one; empty = default browser")},
           ("url_or_query",)),
@@ -370,6 +372,26 @@ TOOLS = [
            "check": _str("a web search query, or a page URL, that shows the current value"),
            "every_minutes": _num("how often to check, 15 to 1440; default 60"),
            "message": _str("optional: what to say when it happens")}, ("condition", "check")),
+    # websites: Karen's own browser window
+    _tool("browse_open", "Do things on websites for the user in Karen's own Chrome window: search a shop, read a "
+          "specific site, fill a form, compare prices, check a result page. Opens the page and returns its text plus "
+          "numbered elements to click or type into. Then use browse_click / browse_type with those numbers, and "
+          "browse_read to check. Never pay or place orders: stop when it's ready and tell the user. If a login or "
+          "CAPTCHA appears, ask the user to do it in the browser window, then continue. When the user names a site, "
+          "go straight there (put the search in the URL when the site allows it, like "
+          "amazon.in/s?k=laptop+stand), not through Google or web_search.",
+          {"url_or_search": _str("a URL or domain, or words to search on Google")}, ("url_or_search",)),
+    _tool("browse_read", "Read the current page in Karen's browser again (text and numbered elements)."),
+    _tool("browse_click", "Click a link or button in Karen's browser by its element number from the last page read.",
+          {"element": _num("the element number")}, ("element",)),
+    _tool("browse_type", "Type into a field in Karen's browser by its element number; submit=true presses Enter.",
+          {"element": _num("the field's element number"), "text": _str("what to type"),
+           "submit": _bool("press Enter afterwards")}, ("element", "text")),
+    _tool("browse_scroll", "Scroll Karen's browser page to see more.",
+          {"direction": {"type": "string", "enum": ["down", "up"]}}),
+    _tool("browse_back", "Go back to the previous page in Karen's browser."),
+    _tool("browse_look", "Screenshot Karen's browser page and look at it, for images, prices in pictures, or "
+          "checking a result.", {"question": _str("what to look for")}),
     _tool("list_watchers", "List upcoming alerts, scheduled routines and things being watched."),
     _tool("cancel_watcher", "Cancel an alert, routine or watch.", {"what": _str("its id, or words from it")},
           ("what",)),
@@ -505,6 +527,10 @@ TOOL_FUNCS = {
     "list_protocols": list_protocols, "delete_protocol": delete_protocol,
     "schedule": watchers.schedule, "watch_for": watchers.add_condition,
     "list_watchers": watchers.list_all, "cancel_watcher": watchers.cancel,
+    "browse_open": browser.browse_open, "browse_read": browser.browse_read,
+    "browse_click": lambda element: browser.browse_click(element),
+    "browse_type": lambda element, text, submit=False: browser.browse_type(element, text, submit),
+    "browse_scroll": browser.browse_scroll, "browse_back": browser.browse_back, "browse_look": browser.browse_look,
 }
 TOOL_PARAMS = {t["function"]["name"]: set(t["function"]["parameters"]["properties"]) for t in TOOLS}
 # tools that return {"needs_confirmation"} until called again after the user says yes
@@ -531,6 +557,13 @@ TOOL_STATUS = {
     "schedule": lambda a: "scheduling it",
     "watch_for": lambda a: f"watching for: {_short(a.get('condition', ''), 40)}",
     "list_watchers": lambda a: "checking what's scheduled",
+    "browse_open": lambda a: f"opening {_short(a.get('url_or_search', ''), 40)}",
+    "browse_read": lambda a: "reading the page",
+    "browse_click": lambda a: f"clicking [{a.get('element', '')}]",
+    "browse_type": lambda a: f"typing “{_short(a.get('text', ''), 30)}”",
+    "browse_scroll": lambda a: f"scrolling {a.get('direction', 'down')}",
+    "browse_back": lambda a: "going back",
+    "browse_look": lambda a: "looking at the page",
     "cancel_watcher": lambda a: "cancelling it",
     "run_protocol": lambda a: f"starting {a.get('name', 'protocol')}",
     "list_protocols": lambda a: "checking your protocols",
@@ -647,7 +680,12 @@ history_lock = threading.Lock()
 MAX_HISTORY = 16
 MAX_STEPS = 12
 TOKEN_LIMIT = 7600  # Groq free tier: ~8k tokens/minute per model, prompt + completion
-INPUT_BUDGET = 5400
+INPUT_BUDGET = 5400  # Groq's free tier: about 8k tokens a minute, prompt and reply together
+
+
+def input_budget() -> int:
+    """How big a prompt may get: small on free Groq, roomy on OpenRouter (web pages are long)."""
+    return INPUT_BUDGET if brain_name() == "groq" else 16000
 _turn_counter = 0
 # each model has its own per-minute token allowance, so an agent task can move between them
 
@@ -679,6 +717,8 @@ def system_prompt(on_phone: bool = False) -> str:
         "if something truly can't be done, say so plainly. Only take PC actions the user asked for. "
         "For anything that changes over time or that you're unsure of - prices, news, sports, releases, people's "
         "roles - search the web first and answer with the specific facts and numbers you found. "
+        "While you are using tools, write nothing - no 'let me', 'now I'll' or 'trying again' - and speak once, "
+        "when the work is done. "
         "Your final reply is spoken aloud: 1-3 short natural sentences (under 60 words unless the user asks for "
         "detail) summarising the result, with no markdown, lists, emojis, tables or URLs. Write numbers as digits "
         "with units (like ₹15,458 or 27°C). "
@@ -717,20 +757,20 @@ def build_convo(on_phone: bool = False) -> list[dict]:
             m["content"] = FENCE.sub("[code omitted]", m["content"])
     system = {"role": "system", "content": system_prompt(on_phone)}
     clock = time_note()
-    while len(msgs) > 1 and est_tokens([system, clock, *msgs]) > INPUT_BUDGET:
+    while len(msgs) > 1 and est_tokens([system, clock, *msgs]) > input_budget():
         msgs.pop(0)
     return [system, clock, *msgs]
 
 
 def compact_convo(convo: list[dict], turn_start: int) -> None:
     """Keep a long agent task under the token budget: shorten old tool results, then drop old chat."""
-    if est_tokens(convo) <= INPUT_BUDGET:
+    if est_tokens(convo) <= input_budget():
         return
     tool_msgs = [m for m in convo[turn_start:] if m["role"] == "tool"]
     for m in tool_msgs[:-2]:
         if len(m["content"]) > 300:
             m["content"] = m["content"][:300] + "… [shortened]"
-    while est_tokens(convo) > INPUT_BUDGET and turn_start > 2:
+    while est_tokens(convo) > input_budget() and turn_start > 2:
         del convo[1]  # oldest message after the system prompt
         turn_start -= 1
 
@@ -887,6 +927,7 @@ ACTION_REQUEST = re.compile(
     r"start|stop|turn|change|download|lock|shut|restart|play|pause|clean|zip|organi[sz]e|add|put|kill|"
     # scheduling: these need a tool call, not an answer now
     r"remind|alert|notify|schedule|watch|cancel|"
+    r"website|site|browser|book|order|go to|fill|sign up|log ?in|compare|buy|"
     r"(?:tell|let) me (?:when|if|at)|keep (?:an )?eye|every (?:day|morning|evening|night|week|hour|\d+)|"
     r"at \d{1,2}(?::\d{2}|\s*(?:am|pm))|tomorrow at|tonight at)\b", re.I)
 CLAIMS_DONE = re.compile(
@@ -907,6 +948,7 @@ _active_turn: dict = {}
 
 
 SCHEDULING_TOOLS = {"schedule", "watch_for", "set_reminder"}
+REPEATABLE = {"browse_read", "browse_scroll", "browse_back", "browse_look", "browse_click"}
 
 
 def run_turn(user_text: str, on_phone: bool = False, scheduled: bool = False):
@@ -954,6 +996,7 @@ def run_turn(user_text: str, on_phone: bool = False, scheduled: bool = False):
             "out every step.")})
 
     final = ""
+    answer = ""  # what the model said after its last tool call: the actual reply
     steps: list[dict] = []
     executed: set[tuple[str, str]] = set()
     no_tools = False
@@ -965,6 +1008,11 @@ def run_turn(user_text: str, on_phone: bool = False, scheduled: bool = False):
         for step in itertools.count():
             if step >= ctx["max_steps"]:
                 break
+            if step == ctx["max_steps"] - 1 and executed:
+                # last step: no more tools, so report instead of narrating
+                convo.append({"role": "system", "content": (
+                    "You're out of steps for this request. Stop now and tell the user, in 2-3 sentences, what you "
+                    "got done, what's left for them to do, and where (e.g. in the browser window).")})
             compact_convo(convo, turn_start)
             calls: dict[int, dict] = {}
             content = ""
@@ -1000,15 +1048,17 @@ def run_turn(user_text: str, on_phone: bool = False, scheduled: bool = False):
             if hold and content:
                 yield ("text", content)
             # models sometimes answer and then repeat the same tool call; stop there
-            fresh = [c for c in calls.values() if _call_key(c) not in executed]
+            # on a web page, scrolling or reading again is progress, not a loop (max_steps still caps it)
+            fresh = [c for c in calls.values() if c["name"] in REPEATABLE or _call_key(c) not in executed]
             if calls and not fresh:
                 if content.strip():
-                    final = content
+                    final = answer = content
                     break
                 no_tools = True  # it is looping: make it answer from what it has
                 continue
             final += content
             if not fresh:
+                answer = content
                 break
             executed.update(_call_key(c) for c in fresh)
 
@@ -1028,6 +1078,8 @@ def run_turn(user_text: str, on_phone: bool = False, scheduled: bool = False):
                     return  # interrupted: don't start more actions
                 yield ("tool", c["name"], args)
                 result = run_tool(c["name"], args, ctx)
+                if c["name"].startswith("browse_"):
+                    ctx["max_steps"] = max(ctx["max_steps"], 20)
                 if c["name"] == "run_protocol" and result.get("steps"):
                     start_protocol(result)
                 summary = step_summary(c["name"], args, result)
@@ -1038,9 +1090,13 @@ def run_turn(user_text: str, on_phone: bool = False, scheduled: bool = False):
                 convo.append({"role": "tool", "tool_call_id": c["id"] or f"call_{step}_{i}", "content": text[:4000]})
 
         if not final.strip():
-            final = "Sorry, I couldn't finish that. Could you ask again?"
+            final = answer = "Sorry, I couldn't finish that. Could you ask again?"
             yield ("text", final)
+        if executed and answer.strip() and answer.strip() != final.strip():
+            yield ("answer", answer.strip())
     finally:
+        if executed and answer.strip():
+            final = answer
         # An interrupted turn must still be closed off in the history, or the
         # next turn sees an unanswered request and acts on it again.
         reply = final.strip() or "[interrupted before replying; do not act on that request again unless asked]"
@@ -1224,6 +1280,7 @@ def chat_events(text: str, speak: bool, on_phone: bool = False, scheduled: bool 
     t0 = time.time()
     marks: dict[str, float] = {}
     has_code = announced_code = False
+    answer_text = ""
 
     def clip_event(clip) -> str:
         nonlocal seq
@@ -1293,6 +1350,8 @@ def chat_events(text: str, speak: bool, on_phone: bool = False, scheduled: bool 
                     speech.released = True
             elif kind == "step":
                 yield event(t="step", **data[0])
+            elif kind == "answer":
+                answer_text = data[0]
             elif kind == "status":
                 yield event(t="status", text=data[0])
             yield from audio()
@@ -1307,6 +1366,9 @@ def chat_events(text: str, speak: bool, on_phone: bool = False, scheduled: bool 
             speech.feed(visible[spoken_len:])
             speech.flush()
             speech.released = True
+        if answer_text and not code:
+            spoken = split_code(answer_text)[0] or spoken
+        spoken = re.sub(r"\*\*|__", "", spoken)  # the model sometimes bolds things anyway
         yield event(t="caption", text=spoken or ("Here's the code." if code else ""))
         print(f"Karen > {spoken}" + (f"  [+{len(code)} code block(s)]" if code else ""))
 

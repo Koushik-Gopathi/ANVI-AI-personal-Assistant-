@@ -93,6 +93,20 @@ While a task runs, the steps she takes appear above the reply (✓ done, ? waiti
 
 Only paired devices can use Karen: the QR code carries a secret stored as a cookie on the phone. Delete `.anvi\pairing_secret` and restart to unpair every device.
 
+## Doing things on websites
+
+Karen has her own Chrome window (a separate profile in `%LOCALAPPDATA%\Karenrowser-profile`, so your everyday browser is untouched). You watch every click and can take over at any time.
+
+- "Search amazon.in for a laptop stand under 1,000 and tell me the top three with prices"
+- "Open wikipedia, search for Golconda Fort and tell me who built it"
+- "Compare the price of the boAt Airdopes 141 on Amazon and Flipkart"
+
+She opens the page, reads it as text plus numbered buttons and fields, clicks and types by number, and checks the result (with a screenshot when the page is mostly pictures). Sites you log into once in her window stay logged in.
+
+**She never pays and never types secrets.** "Pay", "Place order", "Buy now" and similar buttons are refused — she gets everything ready and tells you to press it. Password, OTP, card, CVV and UPI PIN fields are refused too; if a login or CAPTCHA appears she asks you to do it in her window.
+
+Works well on search and shopping sites, articles and simple forms. Heavy booking sites with pop-up widgets (IRCTC, airline seat maps) are unreliable for now. Web tasks are capped at 20 steps, and on the paid brain a typical one costs about ₹1.
+
 ## Speaking up on her own
 
 Karen can talk first — reminders, scheduled jobs, and things she keeps an eye on.
@@ -155,6 +169,7 @@ desktop.py       Windows desktop app: window, microphone permission, hotkey
 docs.py          read Word/PDF/PowerPoint, create .docx/.pdf, organise folders
 vision.py        screen and image questions (Groq vision model)
 watchers.py      alerts, scheduled routines and watched conditions; the scheduler
+browser.py       Karen's own Chrome window: open, read, click, type, look; pay and password guards
 store.py         settings, long-term memory, chat history (%LOCALAPPDATA%\Karen)
 mobile/          Flutter Android app (own agent brain + phone actions + PC tools via /api/tool)
 web/             UI: wake word, voice activity detection, streamed playback, step list, code panel, orb
